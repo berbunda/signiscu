@@ -1,0 +1,15 @@
+[input]
+video = "C:/video.mp4"
+candidate_file = "C:/candidate_clips.json"
+
+[output]
+candidate_file = "C:/candidate_clips.json"
+clips_dir = "C:/clips/"
+
+[debug]
+enabled = true
+log_file = "C:/signiscu_debug.log"
+
+[generate]
+
+[cut]
