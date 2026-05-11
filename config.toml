@@ -1,6 +1,6 @@
 [tools]
-ffmpeg_path = "C:/ffmpeg/ffmpeg.exe"
-ffprobe_path = "C:/ffmpeg/ffprobe.exe"
+ffmpeg_path = "C:/ffmpeg.exe"
+ffprobe_path = "C:/ffprobe.exe"
 
 [general]
 overwrite = true
@@ -22,3 +22,15 @@ threshold = 27.0
 min_scene_seconds = 2.0
 show_progress = true
 max_scene_seconds = 30.0
+
+[local_motion_analysis]
+enabled = false
+sample_fps = 2.0
+resize_width = 320
+residual_percentile = 85
+local_motion_threshold = 0.4
+min_local_motion_coverage_ratio = 0.3
+min_local_motion_peak_score = 0.85
+affect_selection = false
+affect_score = false
+weight_local_motion = 0.2

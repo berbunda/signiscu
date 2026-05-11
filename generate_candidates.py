@@ -21,8 +21,10 @@ from debug_runtime import (
     format_generate_post_metrics,
     format_generate_pre_snapshot,
 )
+from progress_ui import tqdm_labeled
 from scene_analysis import SceneSegment, detect_scenes_with_counts
-from settings import ToolSettings
+from local_motion_analysis import analyze_local_motion_raw_for_spans, normalize_local_motion_metrics
+from settings import LocalMotionAnalysisSettings, ToolSettings
 from timecode import seconds_to_display_span, seconds_to_ffmpeg_tc
 
 
@@ -66,7 +68,12 @@ class SceneUnitEval:
     t_end: float
     avg_audio_score: float
     max_audio_score: float
-    coverage_ratio: float
+    audio_coverage_ratio: float
+    avg_local_motion_score: float
+    max_local_motion_score: float
+    min_local_motion_score: float
+    local_motion_coverage_ratio: float
+    selected_reasons: tuple[str, ...]
     accepted: bool
 
 
@@ -100,21 +107,53 @@ def expand_scenes_to_units(
     return out
 
 
-def weighted_mean_norm_in_span(s: float, e: float, windows: list[WindowRow]) -> float:
-    """Среднее norm по пересечениям, взвешенное длительностью пересечения."""
-    num = 0.0
-    den = 0.0
+def audio_metrics_in_span(
+    s: float,
+    e: float,
+    windows: list[WindowRow],
+    threshold: float,
+) -> tuple[float, float, float, float]:
+    """
+    Показатели аудио по интервалу [s,e]: min, max norm пересекающихся окон,
+    средневзвешенное norm, доля времени где norm >= threshold.
+    """
+    D = max(0.0, e - s)
+    eps = 1e-12
+    if D <= eps:
+        return 0.0, 0.0, 0.0, 0.0
+    strong_cover = 0.0
+    weighted_num = 0.0
+    weighted_den = 0.0
+    max_peak = 0.0
+    min_peak: float | None = None
     for w in windows:
         if w.norm is None or not math.isfinite(w.norm):
             continue
         il = intersection_seconds(s, e, w.t_start, w.t_end)
-        if il <= 1e-15:
+        if il <= eps:
             continue
-        num += float(w.norm) * il
-        den += il
-    if den <= 1e-15:
-        return 0.0
-    return max(0.0, min(1.0, num / den))
+        n = float(w.norm)
+        weighted_num += n * il
+        weighted_den += il
+        max_peak = max(max_peak, n)
+        min_peak = n if min_peak is None else min(min_peak, n)
+        if n >= threshold - eps:
+            strong_cover += il
+    coverage_ratio = strong_cover / D if D > eps else 0.0
+    avg_audio = weighted_num / weighted_den if weighted_den > eps else 0.0
+    min_audio = max(0.0, min(1.0, min_peak)) if min_peak is not None else 0.0
+    return (
+        min_audio,
+        max(0.0, min(1.0, max_peak)),
+        max(0.0, min(1.0, avg_audio)),
+        max(0.0, min(1.0, coverage_ratio)),
+    )
+
+
+def weighted_mean_norm_in_span(s: float, e: float, windows: list[WindowRow]) -> float:
+    """Среднее norm по пересечениям, взвешенное длительностью пересечения."""
+    _, _, avg, _ = audio_metrics_in_span(s, e, windows, threshold=1.0)
+    return avg
 
 
 def evaluate_scene_unit(
@@ -125,11 +164,31 @@ def evaluate_scene_unit(
     threshold: float,
     min_audio_coverage_ratio: float,
     min_peak_score: float,
+    avg_local_motion_score: float,
+    max_local_motion_score: float,
+    min_local_motion_score: float,
+    local_motion_coverage_ratio: float,
+    min_local_motion_coverage_ratio: float,
+    min_local_motion_peak_score: float,
+    local_motion_for_selection: bool,
 ) -> SceneUnitEval:
     D = max(0.0, ue - us)
     eps = 1e-12
     if D <= eps:
-        return SceneUnitEval(index, us, ue, 0.0, 0.0, 0.0, False)
+        return SceneUnitEval(
+            index,
+            us,
+            ue,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            tuple(),
+            False,
+        )
 
     strong_cover = 0.0
     weighted_num = 0.0
@@ -150,7 +209,16 @@ def evaluate_scene_unit(
 
     coverage_ratio = strong_cover / D if D > eps else 0.0
     avg_audio = weighted_num / weighted_den if weighted_den > eps else 0.0
-    accepted = coverage_ratio >= min_audio_coverage_ratio - eps or max_peak >= min_peak_score - eps
+    reasons: list[str] = []
+    if coverage_ratio >= min_audio_coverage_ratio - eps:
+        reasons.append("audio_coverage")
+    if max_peak >= min_peak_score - eps:
+        reasons.append("audio_peak")
+    if local_motion_for_selection and local_motion_coverage_ratio >= min_local_motion_coverage_ratio - eps:
+        reasons.append("local_motion_coverage")
+    if local_motion_for_selection and max_local_motion_score >= min_local_motion_peak_score - eps:
+        reasons.append("local_motion_peak")
+    accepted = bool(reasons)
     return SceneUnitEval(
         index,
         us,
@@ -158,8 +226,27 @@ def evaluate_scene_unit(
         max(0.0, min(1.0, avg_audio)),
         max(0.0, min(1.0, max_peak)),
         max(0.0, min(1.0, coverage_ratio)),
+        max(0.0, min(1.0, avg_local_motion_score)),
+        max(0.0, min(1.0, max_local_motion_score)),
+        max(0.0, min(1.0, min_local_motion_score)),
+        max(0.0, min(1.0, local_motion_coverage_ratio)),
+        tuple(reasons),
         accepted,
     )
+
+
+def clip_combined_normalized_score(
+    avg_audio: float,
+    avg_local_motion: float,
+    lm: LocalMotionAnalysisSettings,
+) -> float:
+    """Итоговый score для клипа: только аудио, либо смесь с local motion при affect_score."""
+    aa = max(0.0, min(1.0, avg_audio))
+    if not lm.enabled or not lm.affect_score:
+        return aa
+    w = max(0.0, min(1.0, lm.weight_local_motion))
+    al = max(0.0, min(1.0, avg_local_motion))
+    return (1.0 - w) * aa + w * al
 
 
 def merge_accepted_scene_spans(
@@ -265,6 +352,7 @@ def format_scene_pipeline_debug_sections(
     threshold: float,
     min_cov: float,
     min_peak: float,
+    lm: LocalMotionAnalysisSettings,
 ) -> list[str]:
     lines: list[str] = []
     lines.append("--- Сцены (PySceneDetect, после min_scene_seconds) ---")
@@ -277,6 +365,24 @@ def format_scene_pipeline_debug_sections(
                 f"  #{i} start={seg.start_seconds:.3f}s end={seg.end_seconds:.3f}s duration={d:.3f}s"
             )
     lines.append("")
+    lines.append("--- [local_motion_analysis] (конфиг) ---")
+    lm_sel = lm.enabled and lm.affect_selection
+    lm_sc = lm.enabled and lm.affect_score
+    lines.extend(
+        [
+            f"  enabled = {lm.enabled}",
+            f"  sample_fps = {lm.sample_fps}",
+            f"  resize_width = {lm.resize_width}",
+            f"  residual_percentile = {lm.residual_percentile}",
+            f"  local_motion_threshold = {lm.local_motion_threshold}",
+            f"  min_local_motion_coverage_ratio = {lm.min_local_motion_coverage_ratio}",
+            f"  min_local_motion_peak_score = {lm.min_local_motion_peak_score}",
+            f"  affect_selection = {lm.affect_selection} (локальный motion для отбора: {lm_sel})",
+            f"  affect_score = {lm.affect_score} (локальный motion в normalized_score: {lm_sc})",
+            f"  weight_local_motion = {lm.weight_local_motion}",
+        ]
+    )
+    lines.append("")
     lines.append("--- Единицы отбора (сцена или фрагмент длинной сцены) ---")
     lines.append(
         f"  (threshold={threshold}, min_audio_coverage_ratio={min_cov}, min_peak_score={min_peak})"
@@ -286,13 +392,22 @@ def format_scene_pipeline_debug_sections(
     else:
         for ev in unit_evals:
             d = ev.t_end - ev.t_start
-            status = "принято" if ev.accepted else "отклонено"
-            lines.append(
+            status = "selected" if ev.accepted else "rejected"
+            base = (
                 f"  #{ev.index} {seconds_to_display_span(ev.t_start, ev.t_end)} "
                 f"start={ev.t_start:.3f}s end={ev.t_end:.3f}s duration={d:.3f}s | "
                 f"avg_audio_score={ev.avg_audio_score:.4f} max_audio_score={ev.max_audio_score:.4f} "
-                f"coverage_ratio={ev.coverage_ratio:.4f} | {status}"
+                f"audio_coverage_ratio={ev.audio_coverage_ratio:.4f}"
             )
+            if lm.enabled:
+                base += (
+                    f" | avg_local_motion_score={ev.avg_local_motion_score:.4f} "
+                    f"max_local_motion_score={ev.max_local_motion_score:.4f} "
+                    f"min_local_motion_score={ev.min_local_motion_score:.4f} "
+                    f"local_motion_coverage_ratio={ev.local_motion_coverage_ratio:.4f}"
+                )
+            base += f" | {status} | reason={'/'.join(ev.selected_reasons) if ev.selected_reasons else '-'}"
+            lines.append(base)
     lines.append("")
     lines.append("--- Слияние выбранных единиц (merge_gap_seconds, max_clip_seconds) ---")
     if not merged_spans:
@@ -414,6 +529,7 @@ def build_window_scores(
     video: Path,
     *,
     apply_normalize: bool = True,
+    progress_desc: str | None = None,
 ) -> tuple[list[WindowRow], float | None, str | None]:
     dur, probe_err = ffprobe_duration_seconds(ffprobe_bin, video)
     rows: list[WindowRow] = []
@@ -421,8 +537,14 @@ def build_window_scores(
         return rows, dur, probe_err or "Некорректная длительность видео."
 
     spans = iter_window_spans(dur, settings.window_seconds)
+    pairs = list(enumerate(spans))
+    iter_pairs = (
+        tqdm_labeled(pairs, desc=progress_desc, unit="окно", total=len(pairs))
+        if progress_desc
+        else pairs
+    )
 
-    for i, (st, ed) in enumerate(spans):
+    for i, (st, ed) in iter_pairs:
         ln = max(0.0, ed - st)
         if ln <= 0:
             rows.append(WindowRow(i, st, ed, None, None, None, "Пустое окно."))
@@ -591,6 +713,8 @@ def run_generate(
     except FFmpegMissingError as e:
         return CandidateBuildSummary(0, 0, 0, 0, 0, 0, 0), str(e)
 
+    audio_progress_desc = "[generate] Аудио: FFmpeg volumedetect (окна)"
+
     scene_mode = settings.scene_detection.enabled
     scene_pyscene_count: int | None = None
     scene_after_min_count: int | None = None
@@ -620,8 +744,33 @@ def run_generate(
             settings.scene_detection.max_scene_seconds,
             settings.window_seconds,
         )
+        lm_cfg = settings.local_motion_analysis
+        lm_avg_by_unit = [0.0 for _ in units]
+        lm_max_by_unit = [0.0 for _ in units]
+        lm_min_by_unit = [0.0 for _ in units]
+        lm_cov_by_unit = [0.0 for _ in units]
+        if lm_cfg.enabled and units:
+            lm_raw = analyze_local_motion_raw_for_spans(
+                video,
+                units,
+                sample_fps=lm_cfg.sample_fps,
+                resize_width=lm_cfg.resize_width,
+                residual_percentile=lm_cfg.residual_percentile,
+                progress_desc="[generate] Видео: OpenCV (optical flow, local motion)",
+            )
+            lm_metrics = normalize_local_motion_metrics(lm_raw, lm_cfg.local_motion_threshold)
+            lm_avg_by_unit = [m.avg_local_motion_score for m in lm_metrics]
+            lm_max_by_unit = [m.max_local_motion_score for m in lm_metrics]
+            lm_min_by_unit = [m.min_local_motion_score for m in lm_metrics]
+            lm_cov_by_unit = [m.local_motion_coverage_ratio for m in lm_metrics]
+        lm_for_selection = lm_cfg.enabled and lm_cfg.affect_selection
         rows, duration, probe_msg = build_window_scores(
-            settings, ff, fp, video, apply_normalize=False
+            settings,
+            ff,
+            fp,
+            video,
+            apply_normalize=False,
+            progress_desc=audio_progress_desc,
         )
         normalize_window_scores(rows)
         unit_evals = [
@@ -633,12 +782,21 @@ def run_generate(
                 settings.threshold,
                 settings.min_audio_coverage_ratio,
                 settings.min_peak_score,
+                lm_avg_by_unit[i],
+                lm_max_by_unit[i],
+                lm_min_by_unit[i],
+                lm_cov_by_unit[i],
+                lm_cfg.min_local_motion_coverage_ratio,
+                lm_cfg.min_local_motion_peak_score,
+                lm_for_selection,
             )
             for i, (us, ue) in enumerate(units)
         ]
         selected = sum(1 for e in unit_evals if e.accepted)
     else:
-        rows, duration, probe_msg = build_window_scores(settings, ff, fp, video)
+        rows, duration, probe_msg = build_window_scores(
+            settings, ff, fp, video, progress_desc=audio_progress_desc
+        )
         selected = sum(
             1
             for r in rows
@@ -687,18 +845,52 @@ def run_generate(
                         skipped_short += 1
                         continue
                     gid += 1
-                    agg = weighted_mean_norm_in_span(pad_s, pad_e, rows)
-                    agg3 = round(agg, 3)
-                    name = build_candidate_clip_name(gid, agg3)
-                    clips_out.append(
-                        {
-                            "name": name,
-                            "start": seconds_to_ffmpeg_tc(pad_s),
-                            "end": seconds_to_ffmpeg_tc(pad_e),
-                            "normalized_score": agg3,
-                            "duration_sec": pad_e - pad_s,
-                        }
+                    min_aud, max_aud, avg_aud, cov_aud = audio_metrics_in_span(
+                        pad_s, pad_e, rows, settings.threshold
                     )
+                    avg_lm = 0.0
+                    max_lm_peak = 0.0
+                    min_lm_peak = float("inf")
+                    lm_cov_num = 0.0
+                    lm_cov_den = 0.0
+                    lm_ov_num = 0.0
+                    lm_ov_den = 0.0
+                    if lm_cfg.enabled:
+                        for ev in unit_evals:
+                            il = intersection_seconds(pad_s, pad_e, ev.t_start, ev.t_end)
+                            if il <= 1e-12:
+                                continue
+                            lm_ov_num += ev.avg_local_motion_score * il
+                            lm_ov_den += il
+                            max_lm_peak = max(max_lm_peak, ev.max_local_motion_score)
+                            min_lm_peak = min(min_lm_peak, ev.min_local_motion_score)
+                            lm_cov_num += ev.local_motion_coverage_ratio * il
+                            lm_cov_den += il
+                        if lm_ov_den > 1e-12:
+                            avg_lm = lm_ov_num / lm_ov_den
+                    lm_cov_agg = lm_cov_num / lm_cov_den if lm_cov_den > 1e-12 else 0.0
+                    min_lm_out = 0.0 if min_lm_peak == float("inf") else min_lm_peak
+                    combined = clip_combined_normalized_score(avg_aud, avg_lm, lm_cfg)
+                    agg3 = round(combined, 3)
+                    name = build_candidate_clip_name(gid, agg3)
+                    clip_rec: dict[str, object] = {
+                        "name": name,
+                        "start": seconds_to_ffmpeg_tc(pad_s),
+                        "end": seconds_to_ffmpeg_tc(pad_e),
+                        "duration_sec": pad_e - pad_s,
+                        "normalized_score": agg3,
+                        "audio_score": round(avg_aud, 3),
+                        "min_audio_score": round(min_aud, 3),
+                        "avg_audio_score": round(avg_aud, 3),
+                        "max_audio_score": round(max_aud, 3),
+                        "audio_coverage_ratio": round(cov_aud, 3),
+                        "local_motion_score": round(avg_lm, 3),
+                        "min_local_motion_score": round(min_lm_out, 3),
+                        "avg_local_motion_score": round(avg_lm, 3),
+                        "max_local_motion_score": round(max_lm_peak, 3),
+                        "local_motion_coverage_ratio": round(lm_cov_agg, 3),
+                    }
+                    clips_out.append(clip_rec)
         scene_debug_extra = format_scene_pipeline_debug_sections(
             scene_segments,
             unit_evals,
@@ -706,6 +898,7 @@ def run_generate(
             threshold=settings.threshold,
             min_cov=settings.min_audio_coverage_ratio,
             min_peak=settings.min_peak_score,
+            lm=settings.local_motion_analysis,
         )
     elif duration is None or duration <= 0:
         merged_segments = 0
@@ -819,7 +1012,11 @@ def print_generate_summary(summary: CandidateBuildSummary) -> None:
         print(f"Всего аудио-окон: {summary.total_windows}")
         print(f"Окон с успешным аудио-анализом: {summary.analyzed_ok}")
         print(f"Окон без аудио-анализа: {summary.analyze_failed_windows}")
-        print(f"Выбрано единиц (coverage / peak): {summary.selected_windows}")
+        print(
+            "Выбрано единиц (audio_coverage / audio_peak / "
+            "local_motion_coverage / local_motion_peak): "
+            f"{summary.selected_windows}"
+        )
     else:
         print(f"Обнаружение сцен: disabled")
         print(f"Всего окон: {summary.total_windows}")

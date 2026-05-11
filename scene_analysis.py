@@ -7,6 +7,7 @@ from pathlib import Path
 
 from scenedetect import ContentDetector, detect
 
+from progress_ui import scenedetect_progress_compat
 from settings import SceneDetectionSettings
 
 
@@ -36,11 +37,12 @@ def detect_scenes_with_counts(
     Возвращает (число сцен до фильтра min_scene_seconds, отфильтрованный список).
     """
     path_str = str(Path(video_path))
-    scene_list = detect(
-        path_str,
-        ContentDetector(threshold=scene_settings.threshold),
-        show_progress=scene_settings.show_progress,
-    )
+    with scenedetect_progress_compat(enabled=scene_settings.show_progress):
+        scene_list = detect(
+            path_str,
+            ContentDetector(threshold=scene_settings.threshold),
+            show_progress=scene_settings.show_progress,
+        )
     raw_bounds: list[tuple[float, float]] = []
     for start_tc, end_tc in scene_list:
         s = float(start_tc.get_seconds())

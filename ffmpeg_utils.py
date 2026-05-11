@@ -58,6 +58,31 @@ def ffprobe_exe_for(ffmpeg_exe: Path, configured: str | None) -> Path:
 _MEAN_VOL = re.compile(r"mean_volume:\s*([-+]?\d*\.?\d+)\s*dB", re.I)
 
 
+def ffprobe_file_has_video_stream(ffprobe: Path, path: Path) -> bool:
+    """True, если у файла есть хотя бы один видеопоток (проверка ffprobe)."""
+    cmd = [
+        str(ffprobe),
+        "-hide_banner",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_type",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except OSError:
+        return False
+    if proc.returncode != 0:
+        return False
+    out = (proc.stdout or "").strip().lower()
+    return out == "video"
+
+
 def ffprobe_duration_seconds(ffprobe: Path, input_video: Path) -> tuple[float | None, str | None]:
     cmd = [
         str(ffprobe),
@@ -163,5 +188,6 @@ __all__ = [
     "ffmpeg_volumedetect_mean_db",
     "ffprobe_duration_seconds",
     "ffprobe_exe_for",
+    "ffprobe_file_has_video_stream",
     "resolve_ffmpeg_path",
 ]

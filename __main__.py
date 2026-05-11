@@ -16,6 +16,12 @@ from candidate_loader import CandidateClipsError, load_candidate_clips_json
 from config_loader import ConfigLoadError, load_config_toml
 from cutter import print_summary, run_project
 from debug_runtime import emit_debug_lines, format_cut_pre_snapshot, merge_effective_debug
+from ffmpeg_utils import (
+    FFmpegMissingError,
+    ffmpeg_available,
+    ffprobe_exe_for,
+    ffprobe_file_has_video_stream,
+)
 from generate_candidates import print_generate_summary, run_generate
 from project_toml import ProjectTomlError, load_project_toml
 
@@ -58,10 +64,11 @@ def main() -> None:
                 print(str(e), file=sys.stderr)
                 sys.exit(1)
 
-        video = ga.video or (pt.input_video if pt else None)
-        candidate_json = (
+        video_raw = ga.video or (pt.input_video if pt else None)
+        candidate_base = (
             ga.candidate_json or (pt.output_candidate_file if pt else None) or _default_candidate_json_path()
         )
+        candidate_base = candidate_base.expanduser().resolve()
         if ga.output_dir is not None:
             output_dir = ga.output_dir
         elif pt is not None and pt.output_clips_dir is not None:
@@ -69,30 +76,73 @@ def main() -> None:
         else:
             output_dir = Path("out").expanduser().resolve()
 
-        if video is None:
+        if video_raw is None:
             print("Входное видео не задано.", file=sys.stderr)
             sys.exit(1)
-        if not video.is_file():
-            print(f"Входное видео не найдено: {video}", file=sys.stderr)
+
+        video = Path(video_raw).expanduser().resolve()
+        if not video.exists():
+            print(f"Входной путь не найден: {video}", file=sys.stderr)
+            sys.exit(1)
+
+        if video.is_dir():
+            sources = sorted(
+                (p for p in video.iterdir() if p.is_file()),
+                key=lambda p: p.name.casefold(),
+            )
+            batch = True
+            if not sources:
+                print("Каталог пуст: нечего анализировать.", file=sys.stderr)
+                sys.exit(1)
+        elif video.is_file():
+            sources = [video]
+            batch = False
+        else:
+            print("Ожидался видеофайл или каталог.", file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            ff_bin = ffmpeg_available(settings.ffmpeg_path)
+            ffprobe_bin = ffprobe_exe_for(ff_bin, settings.ffprobe_path)
+        except FFmpegMissingError as e:
+            print(str(e), file=sys.stderr)
             sys.exit(1)
 
         effective_debug = merge_effective_debug(pt, ga.debug, ga.debug_log)
 
-        summary, fatal = run_generate(
-            video=video,
-            candidate_json=candidate_json,
-            output_dir_display=output_dir,
-            settings=settings,
-            list_windows=ga.list_windows,
-            effective_debug=effective_debug,
-            config_path_used=config_path_used,
-            config_path_explicit_cli=cli.config_path_explicit,
-            project_path_used=project_path_used,
-        )
-        if fatal:
-            print(f"[generate] {fatal}")
-        print_generate_summary(summary)
-        sys.exit(1 if fatal else 0)
+        any_fatal = False
+        processed_video_count = 0
+        for vpath in sources:
+            if not ffprobe_file_has_video_stream(ffprobe_bin, vpath):
+                print(f"{vpath.name} не является видеофайлом.")
+                continue
+            processed_video_count += 1
+            candidate_out = (
+                candidate_base.parent / f"candidate_clips_{processed_video_count:05d}.json"
+                if batch
+                else candidate_base
+            )
+            summary, fatal = run_generate(
+                video=vpath,
+                candidate_json=candidate_out,
+                output_dir_display=output_dir,
+                settings=settings,
+                list_windows=ga.list_windows,
+                effective_debug=effective_debug,
+                config_path_used=config_path_used,
+                config_path_explicit_cli=cli.config_path_explicit,
+                project_path_used=project_path_used,
+            )
+            if fatal:
+                print(f"[generate] {fatal}")
+                any_fatal = True
+            print_generate_summary(summary)
+
+        if batch and processed_video_count == 0:
+            print("Ни один файл в каталоге не содержит видеопотока.", file=sys.stderr)
+            sys.exit(1)
+
+        sys.exit(1 if any_fatal else 0)
 
     ca = cli.payload
     if not isinstance(ca, CutArgs):

@@ -14,7 +14,10 @@ class ProjectTomlError(ValueError):
 
 @dataclass(frozen=True)
 class ProjectToml:
-    """Пути и отладка из project.toml (относительные пути — от каталога файла)."""
+    """Пути и отладка из project.toml (относительные пути — от каталога файла).
+
+    input_video — один видеофайл или каталог с файлами (только файлы этого уровня, без рекурсии).
+    """
 
     path: Path
     input_video: Path | None

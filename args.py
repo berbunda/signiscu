@@ -85,7 +85,7 @@ def parse_args(argv: list[str] | None = None) -> ParsedCli:
         nargs="?",
         type=Path,
         default=None,
-        help="Входное видео (или [input] video в project.toml; по умолчанию — из project.toml)",
+        help="Входной видеофайл или каталог с файлами (или [input] video в project.toml)",
     )
     p_gen.add_argument(
         "--project",
@@ -99,7 +99,7 @@ def parse_args(argv: list[str] | None = None) -> ParsedCli:
         type=Path,
         default=None,
         dest="candidate_json",
-        help="JSON кандидата (по умолчанию candidate.json рядом с приложением или [output] candidate_file)",
+        help="JSON кандидата одиночного режима (при каталоге — каталог этого файла; тогда имена candidate_clips_NNNNN.json)",
     )
     p_gen.add_argument(
         "--output-dir",

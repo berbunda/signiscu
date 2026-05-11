@@ -80,6 +80,21 @@ def format_tool_settings_lines(settings: ToolSettings, *, prefix: str = "  ") ->
         f"{prefix}[scene_detection] show_progress = {sd.show_progress}",
         f"{prefix}[scene_detection] max_scene_seconds = {sd.max_scene_seconds}",
     ]
+    lm = settings.local_motion_analysis
+    lines.extend(
+        [
+            f"{prefix}[local_motion_analysis] enabled = {lm.enabled}",
+            f"{prefix}[local_motion_analysis] sample_fps = {lm.sample_fps}",
+            f"{prefix}[local_motion_analysis] resize_width = {lm.resize_width}",
+            f"{prefix}[local_motion_analysis] residual_percentile = {lm.residual_percentile}",
+            f"{prefix}[local_motion_analysis] local_motion_threshold = {lm.local_motion_threshold}",
+            f"{prefix}[local_motion_analysis] min_local_motion_coverage_ratio = {lm.min_local_motion_coverage_ratio}",
+            f"{prefix}[local_motion_analysis] min_local_motion_peak_score = {lm.min_local_motion_peak_score}",
+            f"{prefix}[local_motion_analysis] affect_selection = {lm.affect_selection}",
+            f"{prefix}[local_motion_analysis] affect_score = {lm.affect_score}",
+            f"{prefix}[local_motion_analysis] weight_local_motion = {lm.weight_local_motion}",
+        ]
+    )
     return lines
 
 
