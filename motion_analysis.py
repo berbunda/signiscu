@@ -12,16 +12,18 @@ from progress_ui import tqdm_labeled
 
 
 @dataclass
-class LocalMotionSceneRaw:
-    raw_pair_values: list[float]
+class MotionSpanRaw:
+    """Сырые пары кадров в интервале сцены: (t0, t1, raw_score)."""
+
+    segments: list[tuple[float, float, float]]
 
 
 @dataclass
-class LocalMotionSceneMetrics:
-    avg_local_motion_score: float
-    max_local_motion_score: float
-    min_local_motion_score: float
-    local_motion_coverage_ratio: float
+class MotionSceneMetrics:
+    avg_motion_score: float
+    max_motion_score: float
+    min_motion_score: float
+    motion_coverage_ratio: float
 
 
 def _prepare_gray(frame: np.ndarray, resize_width: int) -> np.ndarray:
@@ -74,7 +76,7 @@ def _pair_residual_percentile(
     return pct
 
 
-def analyze_local_motion_raw_for_spans(
+def analyze_motion_raw_for_spans(
     video_path: Path,
     spans: list[tuple[float, float]],
     *,
@@ -82,75 +84,86 @@ def analyze_local_motion_raw_for_spans(
     resize_width: int,
     residual_percentile: float,
     progress_desc: str | None = None,
-) -> list[LocalMotionSceneRaw]:
+) -> list[MotionSpanRaw]:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        raise RuntimeError(f"Не удалось открыть видео для local motion: {video_path}")
-    out: list[LocalMotionSceneRaw] = []
+        raise RuntimeError(f"Не удалось открыть видео для motion: {video_path}")
+    out: list[MotionSpanRaw] = []
+    dt = 1.0 / sample_fps if sample_fps > 0 else 0.0
     try:
         span_iter = spans
         if progress_desc:
             span_iter = tqdm_labeled(spans, desc=progress_desc, unit="фрагмент", total=len(spans))
         for start_s, end_s in span_iter:
-            if end_s <= start_s:
-                out.append(LocalMotionSceneRaw(raw_pair_values=[]))
+            if end_s <= start_s or dt <= 0:
+                out.append(MotionSpanRaw(segments=[]))
                 continue
             prev_gray: np.ndarray | None = None
-            values: list[float] = []
+            segs: list[tuple[float, float, float]] = []
+            k = 0
             for frame in _iter_sampled_frames(cap, start_s, end_s, sample_fps):
                 cur = _prepare_gray(frame, resize_width)
                 if prev_gray is not None:
-                    values.append(
-                        _pair_residual_percentile(
-                            prev_gray,
-                            cur,
-                            residual_percentile=residual_percentile,
-                        )
+                    raw_v = _pair_residual_percentile(
+                        prev_gray,
+                        cur,
+                        residual_percentile=residual_percentile,
                     )
+                    t0 = start_s + k * dt
+                    t1 = start_s + (k + 1) * dt
+                    segs.append((t0, t1, raw_v))
+                    k += 1
                 prev_gray = cur
-            if not values:
-                out.append(LocalMotionSceneRaw(raw_pair_values=[]))
+            if not segs:
+                out.append(MotionSpanRaw(segments=[]))
                 continue
-            out.append(LocalMotionSceneRaw(raw_pair_values=values))
+            out.append(MotionSpanRaw(segments=segs))
     finally:
         cap.release()
     return out
 
 
-def normalize_local_motion_metrics(
-    raw_items: list[LocalMotionSceneRaw],
-    local_motion_threshold: float,
-) -> list[LocalMotionSceneMetrics]:
-    all_values = [v for r in raw_items for v in r.raw_pair_values]
-    max_raw = max(all_values, default=0.0)
+def normalize_motion_metrics(
+    raw_items: list[MotionSpanRaw],
+    motion_threshold: float,
+) -> tuple[list[MotionSceneMetrics], list[list[tuple[float, float, float]]]]:
+    """
+    Глобальная нормализация raw / max_raw по всем spans; метрики и (t0,t1,norm) на span.
+    """
+    all_raw = [v for r in raw_items for _, _, v in r.segments]
+    max_raw = max(all_raw, default=0.0)
+    timed_norm_out: list[list[tuple[float, float, float]]] = []
+
     if max_raw <= 0.0:
-        return [LocalMotionSceneMetrics(0.0, 0.0, 0.0, 0.0) for _ in raw_items]
+        for r in raw_items:
+            timed_norm_out.append([(t0, t1, 0.0) for t0, t1, _ in r.segments])
+        return [MotionSceneMetrics(0.0, 0.0, 0.0, 0.0) for _ in raw_items], timed_norm_out
 
-    per_scene: list[list[float]] = []
     for r in raw_items:
-        if not r.raw_pair_values:
-            per_scene.append([])
-            continue
-        normalized = [max(0.0, min(1.0, v / max_raw)) for v in r.raw_pair_values]
-        per_scene.append(normalized)
+        norms: list[tuple[float, float, float]] = []
+        for t0, t1, raw_v in r.segments:
+            n = max(0.0, min(1.0, raw_v / max_raw))
+            norms.append((t0, t1, n))
+        timed_norm_out.append(norms)
 
-    out: list[LocalMotionSceneMetrics] = []
-    for pairs in per_scene:
+    out_metrics: list[MotionSceneMetrics] = []
+    for norms in timed_norm_out:
+        pairs = [n for _, _, n in norms]
         if not pairs:
-            out.append(LocalMotionSceneMetrics(0.0, 0.0, 0.0, 0.0))
+            out_metrics.append(MotionSceneMetrics(0.0, 0.0, 0.0, 0.0))
             continue
         avg_n = sum(pairs) / len(pairs)
         max_n = max(pairs)
         min_n = min(pairs)
-        over = sum(1 for v in pairs if v >= local_motion_threshold)
+        over = sum(1 for v in pairs if v >= motion_threshold)
         cov = over / len(pairs)
-        out.append(LocalMotionSceneMetrics(avg_n, max_n, min_n, cov))
-    return out
+        out_metrics.append(MotionSceneMetrics(avg_n, max_n, min_n, cov))
+    return out_metrics, timed_norm_out
 
 
 __all__ = [
-    "LocalMotionSceneMetrics",
-    "LocalMotionSceneRaw",
-    "analyze_local_motion_raw_for_spans",
-    "normalize_local_motion_metrics",
+    "MotionSceneMetrics",
+    "MotionSpanRaw",
+    "analyze_motion_raw_for_spans",
+    "normalize_motion_metrics",
 ]

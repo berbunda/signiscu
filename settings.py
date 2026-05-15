@@ -8,24 +8,26 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class SceneDetectionSettings:
     enabled: bool
+    backend: str
     threshold: float
     min_scene_seconds: float
     show_progress: bool
     max_scene_seconds: float
+    ffmpeg_scene_threshold: float
 
 
 @dataclass(frozen=True)
-class LocalMotionAnalysisSettings:
+class MotionAnalysisSettings:
     enabled: bool
     sample_fps: float
     resize_width: int
     residual_percentile: float
-    local_motion_threshold: float
-    min_local_motion_coverage_ratio: float
-    min_local_motion_peak_score: float
+    motion_threshold: float
+    min_motion_coverage_ratio: float
+    min_motion_peak_score: float
     affect_selection: bool
     affect_score: bool
-    weight_local_motion: float
+    weight_motion: float
 
 
 @dataclass(frozen=True)
@@ -43,11 +45,11 @@ class ToolSettings:
     min_clip_seconds: float
     max_clip_seconds: float
     scene_detection: SceneDetectionSettings
-    local_motion_analysis: LocalMotionAnalysisSettings
+    motion_analysis: MotionAnalysisSettings
 
 
 __all__ = [
-    "LocalMotionAnalysisSettings",
+    "MotionAnalysisSettings",
     "SceneDetectionSettings",
     "ToolSettings",
 ]

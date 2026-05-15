@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -11,8 +12,9 @@ _APP_DIR = Path(__file__).resolve().parent
 if str(_APP_DIR) not in sys.path:
     sys.path.insert(0, str(_APP_DIR))
 
-from args import CutArgs, GenerateArgs, parse_args
+from args import CutArgs, GenerateArgs, ReportArgs, parse_args
 from candidate_loader import CandidateClipsError, load_candidate_clips_json
+from candidate_summary_csv import write_candidate_summary_csv
 from config_loader import ConfigLoadError, load_config_toml
 from cutter import print_summary, run_project
 from debug_runtime import emit_debug_lines, format_cut_pre_snapshot, merge_effective_debug
@@ -23,6 +25,8 @@ from ffmpeg_utils import (
     ffprobe_file_has_video_stream,
 )
 from generate_candidates import print_generate_summary, run_generate
+from report import run_report
+from project_models import Project
 from project_toml import ProjectTomlError, load_project_toml
 
 
@@ -40,11 +44,36 @@ def main() -> None:
     if cli.config_path_explicit and not config_path_used.is_file():
         print(f"Файл настроек не найден: {config_path_used}", file=sys.stderr)
         sys.exit(1)
+    if cli.project_path_explicit:
+        ptp = cli.payload.project_toml
+        if ptp is not None and not ptp.is_file():
+            print(f"Файл проекта не найден: {ptp}", file=sys.stderr)
+            sys.exit(1)
     try:
         settings = load_config_toml(cli.config_path, _default_config_path())
     except ConfigLoadError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
+
+    if cli.command == "report":
+        ra = cli.payload
+        if not isinstance(ra, ReportArgs):
+            raise TypeError("Внутренняя ошибка: ожидался ReportArgs.")
+        if not ra.input_dir.is_dir():
+            print(f"Каталог --input-dir не найден: {ra.input_dir}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            out_path, warnings = run_report(ra.input_dir, ra.output)
+        except Exception as e:
+            print(f"[report] Ошибка: {e}", file=sys.stderr)
+            sys.exit(1)
+        for w in warnings:
+            print(f"[report] предупреждение: {w}", file=sys.stderr)
+        if not out_path.is_file():
+            print("[report] Отчёт не создан.", file=sys.stderr)
+            sys.exit(1)
+        print(f"[report] Отчёт: {out_path}")
+        sys.exit(0 if out_path.stat().st_size > 0 else 1)
 
     if cli.command == "generate":
         ga = cli.payload
@@ -112,6 +141,7 @@ def main() -> None:
 
         any_fatal = False
         processed_video_count = 0
+        json_paths_for_csv: list[Path] = []
         for vpath in sources:
             if not ffprobe_file_has_video_stream(ffprobe_bin, vpath):
                 print(f"{vpath.name} не является видеофайлом.")
@@ -122,7 +152,7 @@ def main() -> None:
                 if batch
                 else candidate_base
             )
-            summary, fatal = run_generate(
+            summary, fatal, wrote_json = run_generate(
                 video=vpath,
                 candidate_json=candidate_out,
                 output_dir_display=output_dir,
@@ -132,7 +162,10 @@ def main() -> None:
                 config_path_used=config_path_used,
                 config_path_explicit_cli=cli.config_path_explicit,
                 project_path_used=project_path_used,
+                metrics_settings=pt.metrics if pt is not None else None,
             )
+            if wrote_json:
+                json_paths_for_csv.append(candidate_out)
             if fatal:
                 print(f"[generate] {fatal}")
                 any_fatal = True
@@ -141,6 +174,10 @@ def main() -> None:
         if batch and processed_video_count == 0:
             print("Ни один файл в каталоге не содержит видеопотока.", file=sys.stderr)
             sys.exit(1)
+
+        if ga.csv:
+            csv_path = write_candidate_summary_csv(candidate_base.parent, json_paths_for_csv)
+            print(f"[generate] Сводный CSV: {csv_path}")
 
         sys.exit(1 if any_fatal else 0)
 
@@ -156,6 +193,81 @@ def main() -> None:
     except FileNotFoundError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
+
+    effective_cut = merge_effective_debug(pt, ca.debug, ca.debug_log)
+    mirror = effective_cut.log_path if effective_cut.enabled and effective_cut.log_path is not None else None
+
+    if ca.input_dir is not None:
+        in_dir = ca.input_dir
+        if not in_dir.is_dir():
+            print(
+                f"Каталог --input-dir не существует или не является каталогом: {in_dir}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        batch_files = sorted(
+            (
+                p
+                for p in in_dir.iterdir()
+                if p.is_file() and fnmatch.fnmatch(p.name, "candidate_clips_*.json")
+            ),
+            key=lambda p: p.name.casefold(),
+        )
+        if not batch_files:
+            print(
+                f"В каталоге не найдено ни одного файла candidate_clips_*.json: {in_dir}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        batches: list[tuple[Path, Project, Path]] = []
+        any_json_error = False
+        for cf in batch_files:
+            try:
+                base = load_candidate_clips_json(cf)
+            except CandidateClipsError as e:
+                any_json_error = True
+                print(f"[cut] Ошибка JSON «{cf.name}»: {e}", file=sys.stderr)
+                continue
+            root_clips = pt.output_clips_dir if pt.output_clips_dir is not None else base.output_dir
+            out_dir = root_clips / cf.stem
+            batches.append((cf, base, out_dir))
+
+        if not batches:
+            print(
+                "[cut] Ни один JSON из каталога не удалось загрузить; нарезка не выполнялась.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        any_block_or_clip_fail = False
+        for cf, base, out_dir in batches:
+            proj_cut = replace(base, input_video=ca.video, output_dir=out_dir)
+            if effective_cut.enabled:
+                snap = format_cut_pre_snapshot(
+                    settings,
+                    video=ca.video,
+                    candidate_in=cf,
+                    output_clips_dir=out_dir,
+                    config_path=config_path_used,
+                    config_explicit_cli=cli.config_path_explicit,
+                    project_path=ca.project_toml,
+                )
+                emit_debug_lines(snap, log_path=effective_cut.log_path)
+
+            results, block = run_project(
+                proj_cut,
+                ffmpeg_executable=settings.ffmpeg_path,
+                overwrite_outputs=settings.overwrite,
+                mirror_log_path=mirror,
+            )
+            print_summary(results, proj_cut.output_dir, block)
+            if block is not None:
+                any_block_or_clip_fail = True
+            if any(not r.ok for r in results):
+                any_block_or_clip_fail = True
+
+        sys.exit(1 if any_json_error or any_block_or_clip_fail else 0)
 
     cf = pt.input_candidate_file
     if cf is None:
@@ -174,7 +286,6 @@ def main() -> None:
     out_dir = pt.output_clips_dir if pt.output_clips_dir is not None else base.output_dir
     proj_cut = replace(base, input_video=ca.video, output_dir=out_dir)
 
-    effective_cut = merge_effective_debug(pt, ca.debug, ca.debug_log)
     if effective_cut.enabled:
         snap = format_cut_pre_snapshot(
             settings,
@@ -186,8 +297,6 @@ def main() -> None:
             project_path=ca.project_toml,
         )
         emit_debug_lines(snap, log_path=effective_cut.log_path)
-
-    mirror = effective_cut.log_path if effective_cut.enabled and effective_cut.log_path is not None else None
 
     results, block = run_project(
         proj_cut,

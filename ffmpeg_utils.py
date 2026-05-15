@@ -5,7 +5,10 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+from progress_ui import progress_to_stderr
 
 
 class FFmpegMissingError(RuntimeError):
@@ -56,6 +59,17 @@ def ffprobe_exe_for(ffmpeg_exe: Path, configured: str | None) -> Path:
 
 
 _MEAN_VOL = re.compile(r"mean_volume:\s*([-+]?\d*\.?\d+)\s*dB", re.I)
+_FFMPEG_TIME_RE = re.compile(r"\btime=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)\b")
+
+
+def ffmpeg_stderr_time_seconds(line: str) -> float | None:
+    """Секунды из строки прогресса ffmpeg (поле time=HH:MM:SS.ms)."""
+    m = _FFMPEG_TIME_RE.search(line)
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    sec = float(m.group(3))
+    return h * 3600.0 + mi * 60.0 + sec
 
 
 def ffprobe_file_has_video_stream(ffprobe: Path, path: Path) -> bool:
@@ -106,6 +120,76 @@ def ffprobe_duration_seconds(ffprobe: Path, input_video: Path) -> tuple[float | 
         return float(out), None
     except ValueError:
         return None, f"Не удалось разобрать длительность: {out!r}"
+
+
+def run_ffmpeg_capture_stderr(
+    cmd: list[str],
+    *,
+    duration_sec: float | None = None,
+    show_progress: bool = False,
+    progress_desc: str = "[generate] FFmpeg",
+) -> tuple[str, int]:
+    """
+    Запуск ffmpeg с построчным чтением stderr.
+    При show_progress и TTY — tqdm по полю time= (нужна duration_sec).
+    """
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            errors="replace",
+        )
+    except OSError as e:
+        raise RuntimeError(f"Не удалось запустить ffmpeg: {e}") from e
+
+    stderr_parts: list[str] = []
+    pbar = None
+    last_t = 0.0
+    use_bar = (
+        show_progress
+        and progress_to_stderr()
+        and duration_sec is not None
+        and duration_sec > 0
+    )
+    if use_bar:
+        try:
+            from tqdm import tqdm
+
+            pbar = tqdm(
+                total=duration_sec,
+                desc=progress_desc,
+                unit="с",
+                file=sys.stderr,
+                ascii=True,
+                leave=True,
+                dynamic_ncols=False,
+            )
+        except ImportError:
+            pbar = None
+
+    assert proc.stderr is not None
+    try:
+        for line in proc.stderr:
+            stderr_parts.append(line)
+            if pbar is not None and duration_sec is not None:
+                t = ffmpeg_stderr_time_seconds(line)
+                if t is not None:
+                    t = min(t, duration_sec)
+                    if t > last_t:
+                        pbar.update(t - last_t)
+                        last_t = t
+    finally:
+        proc.wait()
+        if pbar is not None and duration_sec is not None:
+            if last_t < duration_sec:
+                pbar.update(duration_sec - last_t)
+            pbar.close()
+
+    return "".join(stderr_parts), proc.returncode
 
 
 def ffmpeg_volumedetect_mean_db(
@@ -185,9 +269,11 @@ __all__ = [
     "FFmpegMissingError",
     "cut_clip_copy",
     "ffmpeg_available",
+    "ffmpeg_stderr_time_seconds",
     "ffmpeg_volumedetect_mean_db",
     "ffprobe_duration_seconds",
     "ffprobe_exe_for",
     "ffprobe_file_has_video_stream",
     "resolve_ffmpeg_path",
+    "run_ffmpeg_capture_stderr",
 ]

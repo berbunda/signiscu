@@ -75,24 +75,26 @@ def format_tool_settings_lines(settings: ToolSettings, *, prefix: str = "  ") ->
         f"{prefix}min_clip_seconds = {settings.min_clip_seconds}",
         f"{prefix}max_clip_seconds = {settings.max_clip_seconds}",
         f"{prefix}[scene_detection] enabled = {sd.enabled}",
+        f"{prefix}[scene_detection] backend = {sd.backend}",
         f"{prefix}[scene_detection] threshold = {sd.threshold}",
         f"{prefix}[scene_detection] min_scene_seconds = {sd.min_scene_seconds}",
         f"{prefix}[scene_detection] show_progress = {sd.show_progress}",
         f"{prefix}[scene_detection] max_scene_seconds = {sd.max_scene_seconds}",
+        f"{prefix}[scene_detection] ffmpeg_scene_threshold = {sd.ffmpeg_scene_threshold}",
     ]
-    lm = settings.local_motion_analysis
+    lm = settings.motion_analysis
     lines.extend(
         [
-            f"{prefix}[local_motion_analysis] enabled = {lm.enabled}",
-            f"{prefix}[local_motion_analysis] sample_fps = {lm.sample_fps}",
-            f"{prefix}[local_motion_analysis] resize_width = {lm.resize_width}",
-            f"{prefix}[local_motion_analysis] residual_percentile = {lm.residual_percentile}",
-            f"{prefix}[local_motion_analysis] local_motion_threshold = {lm.local_motion_threshold}",
-            f"{prefix}[local_motion_analysis] min_local_motion_coverage_ratio = {lm.min_local_motion_coverage_ratio}",
-            f"{prefix}[local_motion_analysis] min_local_motion_peak_score = {lm.min_local_motion_peak_score}",
-            f"{prefix}[local_motion_analysis] affect_selection = {lm.affect_selection}",
-            f"{prefix}[local_motion_analysis] affect_score = {lm.affect_score}",
-            f"{prefix}[local_motion_analysis] weight_local_motion = {lm.weight_local_motion}",
+            f"{prefix}[motion_analysis] enabled = {lm.enabled}",
+            f"{prefix}[motion_analysis] sample_fps = {lm.sample_fps}",
+            f"{prefix}[motion_analysis] resize_width = {lm.resize_width}",
+            f"{prefix}[motion_analysis] residual_percentile = {lm.residual_percentile}",
+            f"{prefix}[motion_analysis] motion_threshold = {lm.motion_threshold}",
+            f"{prefix}[motion_analysis] min_motion_coverage_ratio = {lm.min_motion_coverage_ratio}",
+            f"{prefix}[motion_analysis] min_motion_peak_score = {lm.min_motion_peak_score}",
+            f"{prefix}[motion_analysis] affect_selection = {lm.affect_selection}",
+            f"{prefix}[motion_analysis] affect_score = {lm.affect_score}",
+            f"{prefix}[motion_analysis] weight_motion = {lm.weight_motion}",
         ]
     )
     return lines
@@ -164,10 +166,10 @@ def format_generate_post_metrics(
     sd = settings.scene_detection
     lines.append(
         f"обнаружение_сцен = {'enabled' if sd.enabled else 'disabled'} "
-        f"(threshold={sd.threshold}, min_scene_seconds={sd.min_scene_seconds})"
+        f"(backend={sd.backend}, threshold={sd.threshold}, min_scene_seconds={sd.min_scene_seconds})"
     )
     if scene_pyscene_count is not None:
-        lines.append(f"сцен_pyscenedetect = {scene_pyscene_count}")
+        lines.append(f"сцен_до_min_scene_seconds = {scene_pyscene_count}")
     if scene_after_min_count is not None:
         lines.append(f"сцен_после_min_scene_seconds = {scene_after_min_count}")
     lines.append(f"количество_проанализированных_окон = {summary_analyzed_ok}")

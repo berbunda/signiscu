@@ -12,6 +12,60 @@ class ProjectTomlError(ValueError):
     """Ошибка разбора или структуры project.toml."""
 
 
+def _table(root: dict[str, Any], name: str) -> dict[str, Any]:
+    t = root.get(name)
+    if t is None:
+        return {}
+    if not isinstance(t, dict):
+        raise ProjectTomlError(f"Секция [{name}] должна быть таблицей.")
+    return t
+
+
+def _bool(d: dict[str, Any], key: str, default: bool) -> bool:
+    if key not in d:
+        return default
+    v = d[key]
+    if isinstance(v, bool):
+        return v
+    raise ProjectTomlError(f"Поле {key!r}: ожидается true/false.")
+
+
+@dataclass(frozen=True)
+class MetricsSettings:
+    """Опциональные метрики кандидата ([metrics] в project.toml; отсутствие ключа = false)."""
+
+    audio_median: bool = False
+    audio_percentile: bool = False
+    audio_stddev: bool = False
+    audio_peak_density: bool = False
+    audio_peak_duration: bool = False
+    audio_entropy: bool = False
+    motion_median: bool = False
+    motion_percentile: bool = False
+    motion_stddev: bool = False
+    motion_peak_density: bool = False
+    motion_peak_duration: bool = False
+    motion_entropy: bool = False
+
+
+def load_metrics_settings(root: dict[str, Any]) -> MetricsSettings:
+    m = _table(root, "metrics")
+    return MetricsSettings(
+        audio_median=_bool(m, "audio_median", False),
+        audio_percentile=_bool(m, "audio_percentile", False),
+        audio_stddev=_bool(m, "audio_stddev", False),
+        audio_peak_density=_bool(m, "audio_peak_density", False),
+        audio_peak_duration=_bool(m, "audio_peak_duration", False),
+        audio_entropy=_bool(m, "audio_entropy", False),
+        motion_median=_bool(m, "motion_median", False),
+        motion_percentile=_bool(m, "motion_percentile", False),
+        motion_stddev=_bool(m, "motion_stddev", False),
+        motion_peak_density=_bool(m, "motion_peak_density", False),
+        motion_peak_duration=_bool(m, "motion_peak_duration", False),
+        motion_entropy=_bool(m, "motion_entropy", False),
+    )
+
+
 @dataclass(frozen=True)
 class ProjectToml:
     """Пути и отладка из project.toml (относительные пути — от каталога файла).
@@ -26,14 +80,17 @@ class ProjectToml:
     output_clips_dir: Path | None
     debug_enabled: bool
     debug_log_file: Path | None
+    metrics: MetricsSettings
 
 
-def _table(root: dict[str, Any], name: str) -> dict[str, Any]:
-    t = root.get(name)
-    if t is None:
-        return {}
-    if not isinstance(t, dict):
-        raise ProjectTomlError(f"Секция [{name}] должна быть таблицей.")
+def _normalize_windows_path_string(s: str) -> str:
+    """
+    На Windows буква диска должна быть латиницей A–Z.
+    Частая ошибка в TOML: кириллическая «С» (U+0421 / U+0441) вместо латинской «C».
+    """
+    t = s.strip()
+    if len(t) >= 2 and t[1] == ":" and t[0] in ("\u0421", "\u0441"):
+        return "C" + t[1:]
     return t
 
 
@@ -45,7 +102,7 @@ def _path_field(base: Path, d: dict[str, Any], key: str) -> Path | None:
         return None
     if isinstance(v, bool):
         raise ProjectTomlError(f"Поле {key!r}: неверный тип.")
-    s = str(v).strip()
+    s = _normalize_windows_path_string(str(v).strip())
     if not s:
         return None
     p = Path(s)
@@ -88,7 +145,14 @@ def load_project_toml(path: Path) -> ProjectToml:
         output_clips_dir=_path_field(base, out, "clips_dir"),
         debug_enabled=enabled,
         debug_log_file=log_path,
+        metrics=load_metrics_settings(data),
     )
 
 
-__all__ = ["ProjectToml", "ProjectTomlError", "load_project_toml"]
+__all__ = [
+    "MetricsSettings",
+    "ProjectToml",
+    "ProjectTomlError",
+    "load_metrics_settings",
+    "load_project_toml",
+]

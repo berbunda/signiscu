@@ -18,19 +18,21 @@ max_clip_seconds = 90
 
 [scene_detection]
 enabled = true
+backend = "ffmpeg"  # pyscenedetect | ffmpeg
 threshold = 27.0
 min_scene_seconds = 2.0
 show_progress = true
-max_scene_seconds = 30.0
+max_scene_seconds = 150.0
+ffmpeg_scene_threshold = 0.30
 
-[local_motion_analysis]
-enabled = false
+[motion_analysis]
+enabled = true
 sample_fps = 2.0
 resize_width = 320
 residual_percentile = 85
-local_motion_threshold = 0.4
-min_local_motion_coverage_ratio = 0.3
-min_local_motion_peak_score = 0.85
+motion_threshold = 0.4
+min_motion_coverage_ratio = 0.3
+min_motion_peak_score = 0.85
 affect_selection = false
 affect_score = false
-weight_local_motion = 0.2
+weight_motion = 0.2

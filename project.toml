@@ -1,14 +1,30 @@
 [input]
-video = "С:/1080P.mp4"
-candidate_file = "E:/candidate_clips.json"
+video = "C:/input_clips"
+candidate_file = "C:/candidate_clips"
 
 [output]
-candidate_file = "С:/candidate_clips.json"
-clips_dir = "С:/clips/"
+candidate_file = "C:/candidate_clips"
+clips_dir = "C:/output_clips/"
 
 [debug]
-enabled = true
-log_file = "С:/prj/python/out/signiscu_debug.log"
+enabled = false
+log_file = "C:/candidate_clips"
+
+# Опциональные метрики кандидата (по умолчанию все false, если ключ отсутствует).
+[metrics]
+audio_median = true
+audio_percentile = true
+audio_stddev = true
+audio_peak_density = true
+audio_peak_duration = true
+audio_entropy = true
+
+motion_median = true
+motion_percentile = true
+motion_stddev = true
+motion_peak_density = true
+motion_peak_duration = true
+motion_entropy = true
 
 [generate]
 

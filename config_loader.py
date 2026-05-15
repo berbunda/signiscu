@@ -6,7 +6,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from settings import LocalMotionAnalysisSettings, SceneDetectionSettings, ToolSettings
+from settings import MotionAnalysisSettings, SceneDetectionSettings, ToolSettings
 
 
 class ConfigLoadError(ValueError):
@@ -64,9 +64,22 @@ def _bool(d: dict[str, Any], key: str, default: bool) -> bool:
     raise ConfigLoadError(f"Поле {key!r}: ожидается логическое значение.")
 
 
+def _backend(d: dict[str, Any], key: str, default: str, allowed: frozenset[str]) -> str:
+    if key not in d:
+        return default
+    v = d[key]
+    if isinstance(v, bool):
+        raise ConfigLoadError(f"Поле {key!r}: ожидается строка.")
+    s = str(v).strip().lower()
+    if s not in allowed:
+        opts = ", ".join(sorted(allowed))
+        raise ConfigLoadError(f"Поле {key!r}: неизвестный backend {v!r}; допустимо: {opts}.")
+    return s
+
+
 def load_config_toml(explicit_path: Path | None, default_path: Path) -> ToolSettings:
     """
-    Прочитать объединённые секции [tools], [general], [audio_analysis], [scene_detection], [local_motion_analysis].
+    Прочитать объединённые секции [tools], [general], [audio_analysis], [scene_detection], [motion_analysis].
     Отсутствующий файл — значения по умолчанию; отсутствующие ключи — дефолты.
     """
     path = explicit_path if explicit_path is not None else default_path
@@ -85,7 +98,7 @@ def load_config_toml(explicit_path: Path | None, default_path: Path) -> ToolSett
     general = _table(data, "general")
     audio = _table(data, "audio_analysis")
     scene = _table(data, "scene_detection")
-    local_motion = _table(data, "local_motion_analysis")
+    motion_tbl = _table(data, "motion_analysis")
 
     ffmpeg_path = _str_opt(tools.get("ffmpeg_path")) or "ffmpeg"
     ffprobe_path = _str_opt(tools.get("ffprobe_path"))
@@ -94,22 +107,24 @@ def load_config_toml(explicit_path: Path | None, default_path: Path) -> ToolSett
 
     scene_block = SceneDetectionSettings(
         enabled=_bool(scene, "enabled", False),
+        backend=_backend(scene, "backend", "ffmpeg", frozenset({"pyscenedetect", "ffmpeg"})),
         threshold=_float(scene, "threshold", 27.0),
         min_scene_seconds=_float(scene, "min_scene_seconds", 2.0),
         show_progress=_bool(scene, "show_progress", True),
         max_scene_seconds=_float(scene, "max_scene_seconds", 30.0),
+        ffmpeg_scene_threshold=_float(scene, "ffmpeg_scene_threshold", 0.30),
     )
-    local_block = LocalMotionAnalysisSettings(
-        enabled=_bool(local_motion, "enabled", False),
-        sample_fps=_float(local_motion, "sample_fps", 2.0),
-        resize_width=_int(local_motion, "resize_width", 320),
-        residual_percentile=_float(local_motion, "residual_percentile", 85.0),
-        local_motion_threshold=_float(local_motion, "local_motion_threshold", 0.4),
-        min_local_motion_coverage_ratio=_float(local_motion, "min_local_motion_coverage_ratio", 0.3),
-        min_local_motion_peak_score=_float(local_motion, "min_local_motion_peak_score", 0.85),
-        affect_selection=_bool(local_motion, "affect_selection", False),
-        affect_score=_bool(local_motion, "affect_score", False),
-        weight_local_motion=_float(local_motion, "weight_local_motion", 0.2),
+    motion_block = MotionAnalysisSettings(
+        enabled=_bool(motion_tbl, "enabled", False),
+        sample_fps=_float(motion_tbl, "sample_fps", 2.0),
+        resize_width=_int(motion_tbl, "resize_width", 320),
+        residual_percentile=_float(motion_tbl, "residual_percentile", 85.0),
+        motion_threshold=_float(motion_tbl, "motion_threshold", 0.4),
+        min_motion_coverage_ratio=_float(motion_tbl, "min_motion_coverage_ratio", 0.3),
+        min_motion_peak_score=_float(motion_tbl, "min_motion_peak_score", 0.85),
+        affect_selection=_bool(motion_tbl, "affect_selection", False),
+        affect_score=_bool(motion_tbl, "affect_score", False),
+        weight_motion=_float(motion_tbl, "weight_motion", 0.2),
     )
 
     tools_block = ToolSettings(
@@ -126,7 +141,7 @@ def load_config_toml(explicit_path: Path | None, default_path: Path) -> ToolSett
         min_clip_seconds=_float(audio, "min_clip_seconds", 8.0),
         max_clip_seconds=_float(audio, "max_clip_seconds", 90.0),
         scene_detection=scene_block,
-        local_motion_analysis=local_block,
+        motion_analysis=motion_block,
     )
     return tools_block
 

@@ -13,8 +13,15 @@ _APP_DIR = Path(__file__).resolve().parent
 class CutArgs:
     video: Path
     project_toml: Path
+    input_dir: Path | None
     debug: bool | None
     debug_log: Path | None
+
+
+@dataclass(frozen=True)
+class ReportArgs:
+    input_dir: Path
+    output: Path
 
 
 @dataclass(frozen=True)
@@ -24,6 +31,7 @@ class GenerateArgs:
     output_dir: Path | None
     project_toml: Path | None
     list_windows: str
+    csv: bool
     debug: bool | None
     debug_log: Path | None
 
@@ -31,25 +39,37 @@ class GenerateArgs:
 @dataclass(frozen=True)
 class ParsedCli:
     command: str
-    payload: CutArgs | GenerateArgs
+    payload: CutArgs | GenerateArgs | ReportArgs
     config_path: Path | None
     config_path_explicit: bool
+    project_path_explicit: bool
 
 
 def parse_args(argv: list[str] | None = None) -> ParsedCli:
     """
-    Подкоманды:
-    - cut VIDEO [--project project.toml] [--config config.toml] [--debug] [--debug-log PATH]
-    - generate [VIDEO] [--project ...] [-o ...] ... (пути по умолчанию — рядом с __main__.py)
+    Подкоманды (общие флаги --config / --project — до имени подкоманды, как у argparse):
+    - signiscu [--config …] [--project …] cut VIDEO [--debug] [--debug-log PATH] …
+    - signiscu [--config …] [--project …] generate [VIDEO] [-o …] …
+    - signiscu report --input-dir PATH --output report.html
     """
     parser = argparse.ArgumentParser(
         description="Нарезка по project.toml и JSON-кандидату или генерация кандидата (ffmpeg/ffprobe).",
+        epilog=(
+            "Флаги --config и --project задаются до подкоманды cut|generate, "
+            "например: python -m signiscu --project D:/work/project.toml generate"
+        ),
     )
     parser.add_argument(
         "--config",
         type=Path,
         default=None,
         help="Путь к config.toml (по умолчанию — config.toml рядом с приложением)",
+    )
+    parser.add_argument(
+        "--project",
+        type=Path,
+        default=None,
+        help="Путь к project.toml при нестандартном расположении (по умолчанию — project.toml рядом с приложением, если есть)",
     )
 
     subs = parser.add_subparsers(dest="command", required=True)
@@ -59,12 +79,6 @@ def parse_args(argv: list[str] | None = None) -> ParsedCli:
         "video",
         type=Path,
         help="Путь к входному видео (переопределяет input_video из JSON кандидата)",
-    )
-    p_cut.add_argument(
-        "--project",
-        type=Path,
-        default=None,
-        help="Путь к project.toml (по умолчанию — project.toml рядом с приложением, если файл есть)",
     )
     p_cut.add_argument(
         "--debug",
@@ -78,6 +92,12 @@ def parse_args(argv: list[str] | None = None) -> ParsedCli:
         default=None,
         help="Файл журнала отладки (переопределяет debug.log_file в TOML).",
     )
+    p_cut.add_argument(
+        "--input-dir",
+        type=Path,
+        default=None,
+        help="Каталог с candidate_clips_*.json для пакетной нарезки (игнорирует input.candidate_file в project.toml).",
+    )
 
     p_gen = subs.add_parser("generate", help="Сгенерировать JSON кандидата по окнам громкости.")
     p_gen.add_argument(
@@ -86,12 +106,6 @@ def parse_args(argv: list[str] | None = None) -> ParsedCli:
         type=Path,
         default=None,
         help="Входной видеофайл или каталог с файлами (или [input] video в project.toml)",
-    )
-    p_gen.add_argument(
-        "--project",
-        type=Path,
-        default=None,
-        help="project.toml (по умолчанию ищется рядом с приложением, если существует)",
     )
     p_gen.add_argument(
         "-o",
@@ -125,10 +139,42 @@ def parse_args(argv: list[str] | None = None) -> ParsedCli:
         default=None,
         help="Файл журнала отладки (переопределяет log_file в TOML).",
     )
+    p_gen.add_argument(
+        "--csv",
+        action="store_true",
+        help="После generate записать сводный candidate_summary.csv (UTF-8, «;») рядом с JSON кандидатов.",
+    )
+
+    p_report = subs.add_parser("report", help="HTML-отчёт по candidate_clips_*.json.")
+    p_report.add_argument(
+        "--input-dir",
+        type=Path,
+        required=True,
+        help="Каталог с candidate_clips_*.json",
+    )
+    p_report.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Путь к выходному HTML-файлу отчёта",
+    )
 
     ns = parser.parse_args(argv)
     cfg = ns.config
     cfg_explicit = cfg is not None
+    proj_explicit = ns.project is not None
+
+    if ns.command == "report":
+        return ParsedCli(
+            command="report",
+            payload=ReportArgs(
+                input_dir=Path(ns.input_dir).expanduser().resolve(),
+                output=Path(ns.output).expanduser().resolve(),
+            ),
+            config_path=cfg,
+            config_path_explicit=cfg_explicit,
+            project_path_explicit=proj_explicit,
+        )
 
     if ns.command == "cut":
         proj = ns.project
@@ -138,18 +184,22 @@ def parse_args(argv: list[str] | None = None) -> ParsedCli:
                 proj = default_p
             else:
                 parser.error(
-                    "cut: укажите --project или поместите project.toml в каталог приложения."
+                    "cut: укажите --project PATH перед подкомандой cut "
+                    "(как --config: signiscu --project D:/prj/project.toml cut …) "
+                    "или поместите project.toml в каталог приложения."
                 )
         return ParsedCli(
             command="cut",
             payload=CutArgs(
                 video=Path(ns.video).expanduser().resolve(),
                 project_toml=Path(proj).expanduser().resolve(),
+                input_dir=Path(ns.input_dir).expanduser().resolve() if ns.input_dir is not None else None,
                 debug=ns.debug,
                 debug_log=Path(ns.debug_log).expanduser().resolve() if ns.debug_log is not None else None,
             ),
             config_path=cfg,
             config_path_explicit=cfg_explicit,
+            project_path_explicit=proj_explicit,
         )
 
     out_dir = Path(ns.output_dir).expanduser().resolve() if ns.output_dir is not None else None
@@ -169,12 +219,14 @@ def parse_args(argv: list[str] | None = None) -> ParsedCli:
             output_dir=out_dir,
             project_toml=proj_g,
             list_windows=str(ns.list_windows),
+            csv=bool(ns.csv),
             debug=ns.debug,
             debug_log=Path(ns.debug_log).expanduser().resolve() if ns.debug_log is not None else None,
         ),
         config_path=cfg,
         config_path_explicit=cfg_explicit,
+        project_path_explicit=proj_explicit,
     )
 
 
-__all__ = ["CutArgs", "GenerateArgs", "ParsedCli", "parse_args"]
+__all__ = ["CutArgs", "GenerateArgs", "ReportArgs", "ParsedCli", "parse_args"]
