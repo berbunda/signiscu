@@ -7,8 +7,8 @@ candidate_file = "C:/candidate_clips"
 clips_dir = "C:/output_clips/"
 
 [debug]
-enabled = false
-log_file = "C:/candidate_clips"
+enabled = true
+log_file = "./debug.log"
 
 # Опциональные метрики кандидата (по умолчанию все false, если ключ отсутствует).
 [metrics]

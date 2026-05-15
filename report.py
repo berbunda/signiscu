@@ -1,4 +1,4 @@
-"""Single-file HTML-отчёт по candidate_clips_*.json."""
+"""Single-file HTML-отчёт по JSON-кандидатам (любые *.json в каталоге)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ _MODAL_MAX_WIDTH = 960
 _PREVIEW_COUNT = 6
 # Порядок ячеек сетки 2×3: сначала колонка 1 (кадры 1–3), затем колонка 2 (4–6).
 _PREVIEW_GRID_INDEX_ORDER = (0, 3, 1, 4, 2, 5)
-_CANDIDATE_GLOB = "candidate_clips_*.json"
+_JSON_GLOB = "*.json"
 
 
 @dataclass
@@ -28,6 +28,7 @@ class PreviewFrame:
 
 @dataclass
 class ReportCandidate:
+    candidate_name: str
     start_tc: str
     end_tc: str
     start_sec: float
@@ -42,6 +43,7 @@ class ReportCandidate:
 class ReportGroup:
     video_name: str
     json_name: str
+    source_video_abs: str
     video_path: Path | None
     candidates: list[ReportCandidate]
     warning: str | None = None
@@ -54,15 +56,15 @@ class ReportData:
 
 
 def load_candidate_files(input_dir: Path) -> tuple[list[tuple[Path, dict[str, Any]]], list[str]]:
-    """Найти и загрузить candidate_clips_*.json; повреждённые пропускаются с warning."""
+    """Найти и загрузить все *.json в каталоге; повреждённые пропускаются с warning."""
     input_dir = input_dir.expanduser().resolve()
     warnings: list[str] = []
     if not input_dir.is_dir():
         return [], [f"Каталог не найден: {input_dir}"]
 
-    paths = sorted(input_dir.glob(_CANDIDATE_GLOB), key=lambda p: p.name.casefold())
+    paths = sorted(input_dir.glob(_JSON_GLOB), key=lambda p: p.name.casefold())
     if not paths:
-        return [], [f"В каталоге нет файлов {_CANDIDATE_GLOB}: {input_dir}"]
+        return [], [f"В каталоге нет файлов {_JSON_GLOB}: {input_dir}"]
 
     loaded: list[tuple[Path, dict[str, Any]]] = []
     for jp in paths:
@@ -208,13 +210,16 @@ def _build_groups(
         in_raw = data.get("input_video")
         video_path: Path | None = None
         video_name = "(unknown)"
+        source_abs = ""
         group_warn: str | None = None
 
         if isinstance(in_raw, str) and in_raw.strip():
-            video_path = Path(in_raw.strip()).expanduser()
-            video_name = video_path.name
-            if not video_path.is_file():
-                group_warn = f"Видео не найдено: {video_path}"
+            vp = Path(in_raw.strip()).expanduser()
+            source_abs = str(vp.resolve())
+            video_name = vp.name
+            video_path = vp
+            if not vp.is_file():
+                group_warn = f"Видео не найдено: {vp}"
                 warnings.append(f"{json_name}: {group_warn}")
                 video_path = None
         else:
@@ -228,6 +233,7 @@ def _build_groups(
                 ReportGroup(
                     video_name=video_name,
                     json_name=json_name,
+                    source_video_abs=source_abs,
                     video_path=video_path,
                     candidates=[],
                     warning=group_warn,
@@ -240,6 +246,11 @@ def _build_groups(
             if not isinstance(clip, dict):
                 warnings.append(f"{json_name}: клип #{i + 1} не объект")
                 continue
+            cn_raw = clip.get("name")
+            if not isinstance(cn_raw, str) or not cn_raw.strip():
+                warnings.append(f"{json_name}: клип #{i + 1} — нет поля name")
+                continue
+            candidate_name = cn_raw.strip()
             times = _clip_times(clip)
             if times is None:
                 warnings.append(f"{json_name}: клип #{i + 1} — неверные start/end")
@@ -265,6 +276,7 @@ def _build_groups(
 
             candidates.append(
                 ReportCandidate(
+                    candidate_name=candidate_name,
                     start_tc=start_tc,
                     end_tc=end_tc,
                     start_sec=start_sec,
@@ -281,6 +293,7 @@ def _build_groups(
             ReportGroup(
                 video_name=video_name,
                 json_name=json_name,
+                source_video_abs=source_abs,
                 video_path=video_path,
                 candidates=candidates,
                 warning=group_warn,
@@ -343,14 +356,21 @@ def _render_previews(previews: list[PreviewFrame]) -> str:
     return f'<div class="previews">{"".join(parts)}</div>'
 
 
-def _render_card(c: ReportCandidate, video_name: str) -> str:
+def _render_card(c: ReportCandidate, g: ReportGroup) -> str:
     dur = f"{c.duration_sec:.3f} с" if c.duration_sec is not None else "—"
     warn = ""
     if c.warning:
         warn = f'<p class="card-warn">{_esc(c.warning)}</p>'
     return (
-        f'<article class="card">'
-        f'<p class="card-source">{_esc(video_name)}</p>'
+        f'<article class="card" data-candidate-file="{_esc(g.json_name)}" '
+        f'data-candidate-name="{_esc(c.candidate_name)}" '
+        f'data-source-video="{_esc(g.source_video_abs)}" '
+        f'data-start="{_esc(c.start_tc)}" data-end="{_esc(c.end_tc)}">'
+        f'<label class="card-select-row">'
+        f'<input type="checkbox" class="card-select">'
+        f'<span class="card-select-label">Select</span>'
+        f"</label>"
+        f'<p class="card-source">{_esc(g.video_name)}</p>'
         f'<div class="card-times mono">'
         f"<span>{_esc(c.start_tc)}</span>"
         f'<span class="arrow">→</span>'
@@ -369,7 +389,7 @@ def _render_group(g: ReportGroup) -> str:
     warn = ""
     if g.warning:
         warn = f'<p class="group-warn">{_esc(g.warning)}</p>'
-    cards = "".join(_render_card(c, g.video_name) for c in g.candidates)
+    cards = "".join(_render_card(c, g) for c in g.candidates)
     if not cards:
         cards = '<p class="muted">нет кандидатов</p>'
     return (
@@ -410,6 +430,35 @@ header {
 }
 header h1 { margin: 0 0 0.25rem; font-size: 1.35rem; font-weight: 600; }
 header p { margin: 0; color: var(--muted); font-size: 0.9rem; }
+.report-toolbar {
+  margin-top: 0.85rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+}
+.report-toolbar button {
+  font: inherit;
+  cursor: pointer;
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+}
+.report-toolbar button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.report-toolbar #btn-export-selection {
+  background: #2a3f5c;
+  border-color: #4a6a8c;
+}
+.selection-count {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--muted);
+}
 .warnings {
   margin: 1rem 1.5rem 0;
   padding: 0.75rem 1rem;
@@ -454,6 +503,16 @@ main { padding: 1rem 1.5rem 2rem; max-width: 1600px; margin: 0 auto; }
   border-color: #4a5568;
   box-shadow: 0 4px 20px rgba(0,0,0,0.25);
 }
+.card-select-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.5rem;
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.card-select-row input { cursor: pointer; }
 .card-source {
   margin: 0 0 0.4rem;
   font-size: 0.82rem;
@@ -546,30 +605,82 @@ main { padding: 1rem 1.5rem 2rem; max-width: 1600px; margin: 0 auto; }
 
 _JS = """
 (function () {
-  var modal = document.getElementById('preview-modal');
-  var modalImg = document.getElementById('preview-modal-img');
-  if (!modal || !modalImg) return;
-  function closeModal() {
-    modal.classList.add('hidden');
-    modalImg.removeAttribute('src');
-  }
-  function openModal(uri) {
-    modalImg.src = uri;
-    modal.classList.remove('hidden');
-  }
-  document.querySelectorAll('.thumb-btn').forEach(function (btn) {
-    btn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      var uri = btn.getAttribute('data-full');
-      if (uri) openModal(uri);
+  function initModal() {
+    var modal = document.getElementById('preview-modal');
+    var modalImg = document.getElementById('preview-modal-img');
+    if (!modal || !modalImg) return;
+    function closeModal() {
+      modal.classList.add('hidden');
+      modalImg.removeAttribute('src');
+    }
+    function openModal(uri) {
+      modalImg.src = uri;
+      modal.classList.remove('hidden');
+    }
+    document.querySelectorAll('.thumb-btn').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var uri = btn.getAttribute('data-full');
+        if (uri) openModal(uri);
+      });
     });
+    modal.addEventListener('click', function (e) {
+      if (e.target === modal) closeModal();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeModal();
+    });
+  }
+
+  function getCards() {
+    return document.querySelectorAll('article.card');
+  }
+
+  function updateCount() {
+    var n = document.querySelectorAll('article.card .card-select:checked').length;
+    var el = document.getElementById('selection-count');
+    if (el) el.textContent = 'Selected: ' + n;
+  }
+
+  function exportSelection() {
+    var selected = [];
+    getCards().forEach(function (card) {
+      var cb = card.querySelector('.card-select');
+      if (!cb || !cb.checked) return;
+      var cf = card.getAttribute('data-candidate-file');
+      var cn = card.getAttribute('data-candidate-name');
+      if (!cf || !cn) return;
+      selected.push({ candidate_file: cf, candidate_name: cn });
+    });
+    var blob = new Blob(
+      [JSON.stringify({ selected: selected }, null, 2)],
+      { type: 'application/json;charset=utf-8' }
+    );
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'selected_candidates.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+  }
+
+  document.getElementById('btn-select-all') && document.getElementById('btn-select-all').addEventListener('click', function () {
+    document.querySelectorAll('article.card .card-select').forEach(function (cb) { cb.checked = true; });
+    updateCount();
   });
-  modal.addEventListener('click', function (e) {
-    if (e.target === modal) closeModal();
+  document.getElementById('btn-deselect-all') && document.getElementById('btn-deselect-all').addEventListener('click', function () {
+    document.querySelectorAll('article.card .card-select').forEach(function (cb) { cb.checked = false; });
+    updateCount();
   });
-  document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') closeModal();
+  document.getElementById('btn-export-selection') && document.getElementById('btn-export-selection').addEventListener('click', exportSelection);
+
+  document.querySelectorAll('article.card .card-select').forEach(function (cb) {
+    cb.addEventListener('change', updateCount);
   });
+
+  initModal();
+  updateCount();
 })();
 """
 
@@ -601,6 +712,12 @@ def render_html_report(data: ReportData, output_path: Path) -> None:
 <header>
   <h1>signiscu — отчёт по кандидатам</h1>
   <p>{_esc(str(len(data.groups)))} JSON · {_esc(str(total_candidates))} кандидатов</p>
+  <div class="report-toolbar">
+    <button type="button" id="btn-select-all">Select all</button>
+    <button type="button" id="btn-deselect-all">Deselect all</button>
+    <span id="selection-count" class="selection-count">Selected: 0</span>
+    <button type="button" id="btn-export-selection">Export selection</button>
+  </div>
 </header>
 {warn_block}
 <main>
@@ -630,7 +747,7 @@ def run_report(input_dir: Path, output_path: Path, *, thumb_width: int = _THUMB_
     """Собрать и записать отчёт; вернуть путь и список предупреждений."""
     data = build_report_data(input_dir, thumb_width=thumb_width)
     if not data.groups and not data.warnings:
-        data.warnings.append(f"Нет файлов {_CANDIDATE_GLOB} в {input_dir}")
+        data.warnings.append(f"Нет файлов {_JSON_GLOB} в {input_dir}")
     render_html_report(data, output_path)
     return output_path.resolve(), data.warnings
 

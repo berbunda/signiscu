@@ -806,10 +806,12 @@ def split_clip_bounds(
     return out
 
 
-def build_candidate_clip_name(global_index: int, mean_norm_rounded_3: float) -> str:
-    pct = max(0, min(999, int(round(mean_norm_rounded_3 * 1000))))
-    base = sanitize_clip_filename_part(f"cand_{global_index:03d}_score{pct}")
-    return base
+def build_candidate_clip_name(video_path: Path, global_index: int, score: float) -> str:
+    """Имя кандидата: source_name-candNN_scoreMMM (score → int(round(score * 1000)))."""
+    stem = sanitize_clip_filename_part(video_path.stem)
+    sc = int(round(score * 1000)) if math.isfinite(score) else 0
+    assembled = f"{stem}-cand{global_index:02d}_score{sc}"
+    return sanitize_clip_filename_part(assembled)
 
 
 def run_generate(
@@ -1033,7 +1035,7 @@ def run_generate(
                     min_m_out = 0.0 if min_m_peak == float("inf") else min_m_peak
                     combined = clip_combined_normalized_score(avg_aud, avg_m, motion_cfg)
                     agg3 = round(combined, 3)
-                    name = build_candidate_clip_name(gid, agg3)
+                    name = build_candidate_clip_name(video, gid, agg3)
                     clip_rec: dict[str, object] = {
                         "name": name,
                         "start": seconds_to_ffmpeg_tc(pad_s),
@@ -1108,7 +1110,7 @@ def run_generate(
                     continue
                 gid += 1
                 agg3 = round(agg, 3)
-                name = build_candidate_clip_name(gid, agg3)
+                name = build_candidate_clip_name(video, gid, agg3)
                 rec: dict[str, object] = {
                     "name": name,
                     "start": seconds_to_ffmpeg_tc(a),

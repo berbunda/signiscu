@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import fnmatch
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -12,7 +11,8 @@ _APP_DIR = Path(__file__).resolve().parent
 if str(_APP_DIR) not in sys.path:
     sys.path.insert(0, str(_APP_DIR))
 
-from args import CutArgs, GenerateArgs, ReportArgs, parse_args
+from args import BuildCutArgs, CutArgs, GenerateArgs, ReportArgs, parse_args
+from build_cut import run_build_cut
 from candidate_loader import CandidateClipsError, load_candidate_clips_json
 from candidate_summary_csv import write_candidate_summary_csv
 from config_loader import ConfigLoadError, load_config_toml
@@ -44,7 +44,7 @@ def main() -> None:
     if cli.config_path_explicit and not config_path_used.is_file():
         print(f"Файл настроек не найден: {config_path_used}", file=sys.stderr)
         sys.exit(1)
-    if cli.project_path_explicit:
+    if cli.project_path_explicit and cli.command in ("cut", "generate"):
         ptp = cli.payload.project_toml
         if ptp is not None and not ptp.is_file():
             print(f"Файл проекта не найден: {ptp}", file=sys.stderr)
@@ -54,6 +54,19 @@ def main() -> None:
     except ConfigLoadError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
+
+    if cli.command == "build-cut":
+        ba = cli.payload
+        if not isinstance(ba, BuildCutArgs):
+            raise TypeError("Внутренняя ошибка: ожидался BuildCutArgs.")
+        if not ba.selection.is_file():
+            print(f"Файл manifest не найден: {ba.selection}", file=sys.stderr)
+            sys.exit(1)
+        code, warnings = run_build_cut(ba.selection, ba.input_dir, ba.output_dir)
+        for w in warnings:
+            print(f"[build-cut] предупреждение: {w}", file=sys.stderr)
+        print(f"[build-cut] Выходной каталог: {ba.output_dir.resolve()}")
+        sys.exit(code)
 
     if cli.command == "report":
         ra = cli.payload
@@ -197,25 +210,27 @@ def main() -> None:
     effective_cut = merge_effective_debug(pt, ca.debug, ca.debug_log)
     mirror = effective_cut.log_path if effective_cut.enabled and effective_cut.log_path is not None else None
 
+    batch_dir: Path | None = None
     if ca.input_dir is not None:
-        in_dir = ca.input_dir
+        batch_dir = ca.input_dir
+    elif pt.input_candidate_file is not None and pt.input_candidate_file.is_dir():
+        batch_dir = pt.input_candidate_file
+
+    if batch_dir is not None:
+        in_dir = batch_dir
         if not in_dir.is_dir():
             print(
-                f"Каталог --input-dir не существует или не является каталогом: {in_dir}",
+                f"Каталог с JSON-кандидатами не существует или не является каталогом: {in_dir}",
                 file=sys.stderr,
             )
             sys.exit(1)
         batch_files = sorted(
-            (
-                p
-                for p in in_dir.iterdir()
-                if p.is_file() and fnmatch.fnmatch(p.name, "candidate_clips_*.json")
-            ),
+            (p for p in in_dir.iterdir() if p.is_file() and p.suffix.lower() == ".json"),
             key=lambda p: p.name.casefold(),
         )
         if not batch_files:
             print(
-                f"В каталоге не найдено ни одного файла candidate_clips_*.json: {in_dir}",
+                f"В каталоге не найдено ни одного файла *.json: {in_dir}",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -225,7 +240,7 @@ def main() -> None:
         for cf in batch_files:
             try:
                 base = load_candidate_clips_json(cf)
-            except CandidateClipsError as e:
+            except (CandidateClipsError, FileNotFoundError, OSError, UnicodeError) as e:
                 any_json_error = True
                 print(f"[cut] Ошибка JSON «{cf.name}»: {e}", file=sys.stderr)
                 continue
@@ -242,11 +257,11 @@ def main() -> None:
 
         any_block_or_clip_fail = False
         for cf, base, out_dir in batches:
-            proj_cut = replace(base, input_video=ca.video, output_dir=out_dir)
+            proj_cut = replace(base, output_dir=out_dir)
             if effective_cut.enabled:
                 snap = format_cut_pre_snapshot(
                     settings,
-                    video=ca.video,
+                    video=proj_cut.input_video,
                     candidate_in=cf,
                     output_clips_dir=out_dir,
                     config_path=config_path_used,
@@ -271,10 +286,13 @@ def main() -> None:
 
     cf = pt.input_candidate_file
     if cf is None:
-        print("Не задан входной JSON кандидата в project.toml.", file=sys.stderr)
+        print("Не задан входной JSON кандидата в project.toml ([input].candidate_file).", file=sys.stderr)
         sys.exit(1)
     if not cf.is_file():
-        print(f"Файл кандидата не найден: {cf}", file=sys.stderr)
+        print(
+            f"Файл кандидата не найден ([input].candidate_file — путь к .json или каталог с .json): {cf}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     try:
@@ -284,12 +302,20 @@ def main() -> None:
         sys.exit(1)
 
     out_dir = pt.output_clips_dir if pt.output_clips_dir is not None else base.output_dir
-    proj_cut = replace(base, input_video=ca.video, output_dir=out_dir)
+    vid = pt.input_video if pt.input_video is not None else base.input_video
+    if vid is None:
+        print(
+            "Не задано входное видео: укажите [input] video в project.toml или input_video в JSON кандидата.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    vid = Path(vid).expanduser().resolve()
+    proj_cut = replace(base, input_video=vid, output_dir=out_dir)
 
     if effective_cut.enabled:
         snap = format_cut_pre_snapshot(
             settings,
-            video=ca.video,
+            video=vid,
             candidate_in=cf,
             output_clips_dir=out_dir,
             config_path=config_path_used,
