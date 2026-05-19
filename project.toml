@@ -26,6 +26,27 @@ motion_peak_density = true
 motion_peak_duration = true
 motion_entropy = true
 
+# Экспериментальные MediaPipe Pose метрики (backend = mediapipe_pose в config.toml).
+[motion_analysis.mediapipe_pose_metrics]
+enabled = true
+pose_detection_ratio = true
+avg_visible_landmarks = true
+pose_visibility_score = true
+landmark_dropout_ratio = true
+pose_tracking_stability = true
+upper_body_motion_score = true
+lower_body_motion_score = true
+torso_motion_score = true
+head_motion_score = true
+pose_motion_direction_variance = true
+pose_motion_periodicity = true
+
 [generate]
+
+[selection]
+mode = "filtered"  # filtered | review_all_scenes
+
+[audio_analysis]
+enabled = true
 
 [cut]

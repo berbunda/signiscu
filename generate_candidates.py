@@ -22,9 +22,17 @@ from debug_runtime import (
     format_generate_pre_snapshot,
 )
 from progress_ui import tqdm_labeled
-from scene_analysis import SceneSegment, detect_scenes_with_counts
-from motion_analysis import analyze_motion_raw_for_spans, normalize_motion_metrics
-from project_toml import MetricsSettings
+from scene_analysis import SceneDetectionStats, SceneSegment, detect_scenes_with_counts
+from motion_analysis import (
+    MediapipePoseSpanMetrics,
+    MotionBackendDebugStats,
+    aggregate_pose_span_metrics,
+    analyze_motion_raw_for_spans,
+    build_mediapipe_pose_json_fields,
+    format_motion_backend_debug_lines,
+    normalize_motion_metrics,
+)
+from project_toml import MediapipePoseMetricsSettings, MetricsSettings
 from settings import MotionAnalysisSettings, ToolSettings
 from statistics import (
     collect_norms_in_span,
@@ -67,6 +75,11 @@ class CandidateBuildSummary:
     scenes_pyscenedetect: int | None = None
     scenes_after_min_duration: int | None = None
     scene_units_total: int | None = None
+    selection_mode: str | None = None
+    short_scenes_merged: int | None = None
+    long_scenes_split: int | None = None
+    audio_analysis_enabled: bool | None = None
+    motion_analysis_enabled: bool | None = None
 
 
 @dataclass
@@ -94,17 +107,18 @@ def intersection_seconds(a0: float, a1: float, b0: float, b1: float) -> float:
 def expand_scenes_to_units(
     segments: list[SceneSegment],
     max_scene_seconds: float,
-    window_seconds: float,
-) -> list[tuple[float, float]]:
+) -> tuple[list[tuple[float, float]], int]:
     """
-    Сцены из scene detection; если сцена длиннее max_scene_seconds — режем на окна window_seconds.
+    Сцены из scene detection; если сцена длиннее max_scene_seconds — режем на куски max_scene_seconds.
+    Возвращает (единицы, число длинных сцен, которые были разбиты).
     """
     eps = 1e-9
     out: list[tuple[float, float]] = []
-    if max_scene_seconds <= eps or window_seconds <= eps:
+    long_scenes_split = 0
+    if max_scene_seconds <= eps:
         for seg in segments:
             out.append((float(seg.start_seconds), float(seg.end_seconds)))
-        return out
+        return out, long_scenes_split
     for seg in segments:
         a = float(seg.start_seconds)
         b = float(seg.end_seconds)
@@ -112,9 +126,10 @@ def expand_scenes_to_units(
         if dur <= max_scene_seconds + eps:
             out.append((a, b))
             continue
-        for rel_s, rel_e in iter_window_spans(dur, window_seconds):
+        long_scenes_split += 1
+        for rel_s, rel_e in iter_window_spans(dur, max_scene_seconds):
             out.append((a + rel_s, a + rel_e))
-    return out
+    return out, long_scenes_split
 
 
 def audio_metrics_in_span(
@@ -274,6 +289,30 @@ def audio_signal_in_clip(
         if il1 > il0:
             clipped.append((il0, il1, n))
     return [n for _, _, n in clipped], clipped
+
+
+def clip_mediapipe_pose_metrics_payload(
+    clip_start: float,
+    clip_end: float,
+    units: list[tuple[float, float]],
+    pose_metrics_by_unit: list[MediapipePoseSpanMetrics],
+    *,
+    motion_backend: str,
+    pose_metrics_cfg: MediapipePoseMetricsSettings,
+) -> dict[str, float | None]:
+    """Экспериментальные pose-метрики для клипа; не влияют на selection/score."""
+    if motion_backend.strip().lower() != "mediapipe_pose":
+        return {}
+    pcfg = pose_metrics_cfg
+    if not pcfg.enabled:
+        return {}
+    items: list[tuple[MediapipePoseSpanMetrics, float]] = []
+    for i, (us, ue) in enumerate(units):
+        w = intersection_seconds(clip_start, clip_end, us, ue)
+        if w > 1e-12 and i < len(pose_metrics_by_unit):
+            items.append((pose_metrics_by_unit[i], w))
+    agg = aggregate_pose_span_metrics(items)
+    return build_mediapipe_pose_json_fields(agg, pcfg)
 
 
 def motion_signal_in_clip(
@@ -484,6 +523,7 @@ def format_scene_pipeline_debug_sections(
     min_cov: float,
     min_peak: float,
     motion_cfg: MotionAnalysisSettings,
+    pose_metrics_cfg: MediapipePoseMetricsSettings | None = None,
 ) -> list[str]:
     lines: list[str] = []
     lines.append("--- Сцены (после min_scene_seconds) ---")
@@ -501,18 +541,46 @@ def format_scene_pipeline_debug_sections(
     lm_sc = motion_cfg.enabled and motion_cfg.affect_score
     lines.extend(
         [
+            f"  backend = {motion_cfg.backend}",
             f"  enabled = {motion_cfg.enabled}",
             f"  sample_fps = {motion_cfg.sample_fps}",
             f"  resize_width = {motion_cfg.resize_width}",
             f"  residual_percentile = {motion_cfg.residual_percentile}",
-            f"  motion_threshold = {motion_cfg.motion_threshold}",
             f"  min_motion_coverage_ratio = {motion_cfg.min_motion_coverage_ratio}",
-            f"  min_motion_peak_score = {motion_cfg.min_motion_peak_score}",
+            f"  [optical_flow] motion_threshold = {motion_cfg.optical_flow.motion_threshold}",
+            f"  [optical_flow] min_motion_peak_score = {motion_cfg.optical_flow.min_motion_peak_score}",
+            f"  [mediapipe_pose] motion_threshold = {motion_cfg.mediapipe_pose.motion_threshold}",
+            f"  [mediapipe_pose] min_motion_peak_score = {motion_cfg.mediapipe_pose.min_motion_peak_score}",
+            f"  active motion_threshold = {motion_cfg.motion_threshold} (backend={motion_cfg.backend})",
+            f"  active min_motion_peak_score = {motion_cfg.min_motion_peak_score} (backend={motion_cfg.backend})",
             f"  affect_selection = {motion_cfg.affect_selection} (motion для отбора: {lm_sel})",
             f"  affect_score = {motion_cfg.affect_score} (motion в normalized_score: {lm_sc})",
             f"  weight_motion = {motion_cfg.weight_motion}",
+            f"  mediapipe_pose_model = {motion_cfg.mediapipe_pose_model}",
+            f"  mediapipe_min_detection_confidence = {motion_cfg.mediapipe_min_detection_confidence}",
+            f"  mediapipe_min_tracking_confidence = {motion_cfg.mediapipe_min_tracking_confidence}",
+            f"  mediapipe_visibility_threshold = {motion_cfg.mediapipe_visibility_threshold}",
         ]
     )
+    if pose_metrics_cfg is not None:
+        pm = pose_metrics_cfg
+        lines.extend(
+            [
+                "  [motion_analysis.mediapipe_pose_metrics] (project.toml)",
+                f"    enabled = {pm.enabled}",
+                f"    pose_detection_ratio = {pm.pose_detection_ratio}",
+                f"    avg_visible_landmarks = {pm.avg_visible_landmarks}",
+                f"    pose_visibility_score = {pm.pose_visibility_score}",
+                f"    landmark_dropout_ratio = {pm.landmark_dropout_ratio}",
+                f"    pose_tracking_stability = {pm.pose_tracking_stability}",
+                f"    upper_body_motion_score = {pm.upper_body_motion_score}",
+                f"    lower_body_motion_score = {pm.lower_body_motion_score}",
+                f"    torso_motion_score = {pm.torso_motion_score}",
+                f"    head_motion_score = {pm.head_motion_score}",
+                f"    pose_motion_direction_variance = {pm.pose_motion_direction_variance}",
+                f"    pose_motion_periodicity = {pm.pose_motion_periodicity}",
+            ]
+        )
     lines.append("")
     lines.append("--- Единицы отбора (сцена или фрагмент длинной сцены) ---")
     lines.append(
@@ -807,10 +875,10 @@ def split_clip_bounds(
 
 
 def build_candidate_clip_name(video_path: Path, global_index: int, score: float) -> str:
-    """Имя кандидата: source_name-candNN_scoreMMM (score → int(round(score * 1000)))."""
+    """Имя кандидата: source_name-candNNN_scoreMMM (score → int(round(score * 1000)))."""
     stem = sanitize_clip_filename_part(video_path.stem)
     sc = int(round(score * 1000)) if math.isfinite(score) else 0
-    assembled = f"{stem}-cand{global_index:02d}_score{sc}"
+    assembled = f"{stem}-cand{global_index:03d}_score{sc}"
     return sanitize_clip_filename_part(assembled)
 
 
@@ -826,12 +894,37 @@ def run_generate(
     config_path_explicit_cli: bool,
     project_path_used: Path | None,
     metrics_settings: MetricsSettings | None = None,
+    mediapipe_pose_metrics: MediapipePoseMetricsSettings | None = None,
+    selection_mode: str = "filtered",
+    audio_analysis_enabled: bool = True,
 ) -> tuple[CandidateBuildSummary, str | None, bool]:
     if not video.is_file():
         return CandidateBuildSummary(0, 0, 0, 0, 0, 0, 0), f"Файл видео не найден: {video}", False
 
     m_cfg = metrics_settings if metrics_settings is not None else MetricsSettings()
+    pose_m_cfg = (
+        mediapipe_pose_metrics
+        if mediapipe_pose_metrics is not None
+        else MediapipePoseMetricsSettings()
+    )
     motion_cfg = settings.motion_analysis
+    review_mode = selection_mode.strip().lower() == "review_all_scenes"
+    if review_mode and not settings.scene_detection.enabled:
+        return (
+            CandidateBuildSummary(
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                scene_detection_used=False,
+                selection_mode=selection_mode,
+            ),
+            "Режим review_all_scenes требует scene_detection.enabled = true в config.toml.",
+            False,
+        )
     if effective_debug.enabled:
         pre = format_generate_pre_snapshot(
             settings,
@@ -855,15 +948,18 @@ def run_generate(
     scene_mode = settings.scene_detection.enabled
     scene_pyscene_count: int | None = None
     scene_after_min_count: int | None = None
+    scene_stats: SceneDetectionStats | None = None
     scene_segments: list[SceneSegment] = []
     unit_evals: list[SceneUnitEval] = []
     scene_debug_extra: list[str] | None = None
     merged_raw: list[tuple[float, float]] = []
+    long_scenes_split = 0
+    run_audio = not review_mode or audio_analysis_enabled
 
     if scene_mode:
         scene_backend_debug: list[str] = []
         try:
-            scene_pyscene_count, scene_segments = detect_scenes_with_counts(
+            scene_pyscene_count, scene_segments, scene_stats = detect_scenes_with_counts(
                 video,
                 settings.scene_detection,
                 ffmpeg_bin=ff,
@@ -899,25 +995,57 @@ def run_generate(
         if effective_debug.enabled and scene_backend_debug:
             emit_debug_lines(scene_backend_debug, log_path=effective_debug.log_path)
         scene_after_min_count = len(scene_segments)
-        units = expand_scenes_to_units(
+        units, long_scenes_split = expand_scenes_to_units(
             scene_segments,
             settings.scene_detection.max_scene_seconds,
-            settings.window_seconds,
         )
         motion_avg_by_unit = [0.0 for _ in units]
         motion_max_by_unit = [0.0 for _ in units]
         motion_min_by_unit = [0.0 for _ in units]
         motion_cov_by_unit = [0.0 for _ in units]
         motion_timed_by_unit: list[list[tuple[float, float, float]]] = [[] for _ in units]
+        pose_metrics_by_unit: list[MediapipePoseSpanMetrics] = []
         if motion_cfg.enabled and units:
+            motion_backend = motion_cfg.backend.strip().lower()
+            if motion_backend == "mediapipe_pose":
+                motion_progress = "[generate] Видео: MediaPipe Pose (motion)"
+            else:
+                motion_progress = "[generate] Видео: OpenCV (optical flow, motion)"
+            motion_debug_stats: MotionBackendDebugStats | None = None
+            if effective_debug.enabled and motion_backend == "mediapipe_pose":
+                motion_debug_stats = MotionBackendDebugStats(
+                    backend="mediapipe_pose",
+                    pose_model=motion_cfg.mediapipe_pose_model,
+                    frames_analyzed=0,
+                    poses_detected=0,
+                    avg_visible_landmarks=0.0,
+                    avg_pose_displacement=0.0,
+                    elapsed_sec=0.0,
+                )
+            pose_metrics_out: list[MediapipePoseSpanMetrics] | None = None
+            if motion_backend == "mediapipe_pose" and pose_m_cfg.enabled:
+                pose_metrics_out = pose_metrics_by_unit
             motion_raw = analyze_motion_raw_for_spans(
                 video,
                 units,
+                backend=motion_cfg.backend,
                 sample_fps=motion_cfg.sample_fps,
                 resize_width=motion_cfg.resize_width,
                 residual_percentile=motion_cfg.residual_percentile,
-                progress_desc="[generate] Видео: OpenCV (optical flow, motion)",
+                mediapipe_min_detection_confidence=motion_cfg.mediapipe_min_detection_confidence,
+                mediapipe_min_tracking_confidence=motion_cfg.mediapipe_min_tracking_confidence,
+                mediapipe_visibility_threshold=motion_cfg.mediapipe_visibility_threshold,
+                mediapipe_pose_model=motion_cfg.mediapipe_pose_model,
+                progress_desc=motion_progress,
+                debug_stats=motion_debug_stats,
+                mediapipe_pose_metrics=pose_m_cfg,
+                pose_metrics_out=pose_metrics_out,
             )
+            if motion_debug_stats is not None:
+                emit_debug_lines(
+                    format_motion_backend_debug_lines(motion_debug_stats),
+                    log_path=effective_debug.log_path,
+                )
             motion_metrics, motion_timed_by_unit = normalize_motion_metrics(
                 motion_raw, motion_cfg.motion_threshold
             )
@@ -925,16 +1053,20 @@ def run_generate(
             motion_max_by_unit = [x.max_motion_score for x in motion_metrics]
             motion_min_by_unit = [x.min_motion_score for x in motion_metrics]
             motion_cov_by_unit = [x.motion_coverage_ratio for x in motion_metrics]
-        motion_for_selection = motion_cfg.enabled and motion_cfg.affect_selection
-        rows, duration, probe_msg = build_window_scores(
-            settings,
-            ff,
-            fp,
-            video,
-            apply_normalize=False,
-            progress_desc=audio_progress_desc,
-        )
-        normalize_window_scores(rows)
+        motion_for_selection = motion_cfg.enabled and motion_cfg.affect_selection and not review_mode
+        if run_audio:
+            rows, duration, probe_msg = build_window_scores(
+                settings,
+                ff,
+                fp,
+                video,
+                apply_normalize=False,
+                progress_desc=audio_progress_desc,
+            )
+            normalize_window_scores(rows)
+        else:
+            duration, probe_msg = ffprobe_duration_seconds(fp, video)
+            rows = []
         unit_evals = [
             evaluate_scene_unit(
                 i,
@@ -944,17 +1076,35 @@ def run_generate(
                 settings.threshold,
                 settings.min_audio_coverage_ratio,
                 settings.min_peak_score,
-                motion_avg_by_unit[i],
-                motion_max_by_unit[i],
-                motion_min_by_unit[i],
-                motion_cov_by_unit[i],
+                motion_avg_by_unit[i] if i < len(motion_avg_by_unit) else 0.0,
+                motion_max_by_unit[i] if i < len(motion_max_by_unit) else 0.0,
+                motion_min_by_unit[i] if i < len(motion_min_by_unit) else 0.0,
+                motion_cov_by_unit[i] if i < len(motion_cov_by_unit) else 0.0,
                 motion_cfg.min_motion_coverage_ratio,
                 motion_cfg.min_motion_peak_score,
                 motion_for_selection,
             )
             for i, (us, ue) in enumerate(units)
         ]
-        selected = sum(1 for e in unit_evals if e.accepted)
+        if review_mode:
+            unit_evals = [
+                SceneUnitEval(
+                    ev.index,
+                    ev.t_start,
+                    ev.t_end,
+                    ev.avg_audio_score,
+                    ev.max_audio_score,
+                    ev.audio_coverage_ratio,
+                    ev.avg_motion_score,
+                    ev.max_motion_score,
+                    ev.min_motion_score,
+                    ev.motion_coverage_ratio,
+                    ("review_all_scenes",),
+                    True,
+                )
+                for ev in unit_evals
+            ]
+        selected = len(unit_evals) if review_mode else sum(1 for e in unit_evals if e.accepted)
     else:
         rows, duration, probe_msg = build_window_scores(
             settings, ff, fp, video, progress_desc=audio_progress_desc
@@ -981,6 +1131,80 @@ def run_generate(
     if scene_mode:
         if duration is None or duration <= 0:
             fatal = probe_msg
+        elif review_mode:
+            merged_segments = len(units)
+            gid = 0
+            for ev in unit_evals:
+                pad_s, pad_e = apply_padding(
+                    ev.t_start,
+                    ev.t_end,
+                    settings.padding_before_seconds,
+                    settings.padding_after_seconds,
+                    duration,
+                )
+                if pad_e - pad_s < settings.min_clip_seconds - 1e-9:
+                    skipped_short += 1
+                    continue
+                gid += 1
+                if run_audio:
+                    min_aud, max_aud, avg_aud, cov_aud = audio_metrics_in_span(
+                        pad_s, pad_e, rows, settings.threshold
+                    )
+                else:
+                    min_aud = max_aud = avg_aud = cov_aud = 0.0
+                avg_m = ev.avg_motion_score if motion_cfg.enabled else 0.0
+                max_m_peak = ev.max_motion_score if motion_cfg.enabled else 0.0
+                min_m_out = ev.min_motion_score if motion_cfg.enabled else 0.0
+                m_cov_agg = ev.motion_coverage_ratio if motion_cfg.enabled else 0.0
+                agg3 = round(avg_aud, 3) if run_audio else 0.0
+                name = build_candidate_clip_name(video, gid, agg3)
+                clip_rec: dict[str, object] = {
+                    "name": name,
+                    "start": seconds_to_ffmpeg_tc(pad_s),
+                    "end": seconds_to_ffmpeg_tc(pad_e),
+                    "duration_sec": pad_e - pad_s,
+                    "normalized_score": agg3,
+                    "audio_score": round(avg_aud, 3),
+                    "min_audio_score": round(min_aud, 3),
+                    "avg_audio_score": round(avg_aud, 3),
+                    "max_audio_score": round(max_aud, 3),
+                    "audio_coverage_ratio": round(cov_aud, 3),
+                    "motion_score": round(avg_m, 3),
+                    "min_motion_score": round(min_m_out, 3),
+                    "avg_motion_score": round(avg_m, 3),
+                    "max_motion_score": round(max_m_peak, 3),
+                    "motion_coverage_ratio": round(m_cov_agg, 3),
+                }
+                clip_dur = pad_e - pad_s
+                au_norms, au_timed = audio_signal_in_clip(pad_s, pad_e, rows) if run_audio else ([], [])
+                mo_norms, mo_timed = motion_signal_in_clip(pad_s, pad_e, motion_timed_by_unit)
+                mp_active = motion_cfg.enabled and bool(units)
+                pl = build_clip_metrics_payload(
+                    m_cfg,
+                    duration_sec=clip_dur,
+                    audio_threshold=settings.threshold,
+                    motion_threshold=motion_cfg.motion_threshold,
+                    audio_norms=au_norms,
+                    audio_timed=au_timed,
+                    motion_norms=mo_norms,
+                    motion_timed=mo_timed,
+                    motion_pipeline_active=mp_active,
+                )
+                clip_rec.update(pl)
+                pose_pl = clip_mediapipe_pose_metrics_payload(
+                    pad_s,
+                    pad_e,
+                    units,
+                    pose_metrics_by_unit,
+                    motion_backend=motion_cfg.backend,
+                    pose_metrics_cfg=pose_m_cfg,
+                )
+                clip_rec.update(pose_pl)
+                if effective_debug.enabled and pl:
+                    metrics_debug_lines.extend(format_clip_metrics_debug_lines(name, pl))
+                if effective_debug.enabled and pose_pl:
+                    metrics_debug_lines.extend(format_clip_metrics_debug_lines(name, pose_pl))
+                clips_out.append(clip_rec)
         else:
             accepted_spans = [(e.t_start, e.t_end) for e in unit_evals if e.accepted]
             merged_raw = merge_accepted_scene_spans(
@@ -1069,8 +1293,19 @@ def run_generate(
                         motion_pipeline_active=mp_active,
                     )
                     clip_rec.update(pl)
+                    pose_pl = clip_mediapipe_pose_metrics_payload(
+                        pad_s,
+                        pad_e,
+                        units,
+                        pose_metrics_by_unit,
+                        motion_backend=motion_cfg.backend,
+                        pose_metrics_cfg=pose_m_cfg,
+                    )
+                    clip_rec.update(pose_pl)
                     if effective_debug.enabled and pl:
                         metrics_debug_lines.extend(format_clip_metrics_debug_lines(name, pl))
+                    if effective_debug.enabled and pose_pl:
+                        metrics_debug_lines.extend(format_clip_metrics_debug_lines(name, pose_pl))
                     clips_out.append(clip_rec)
         scene_debug_extra = format_scene_pipeline_debug_sections(
             scene_segments,
@@ -1080,6 +1315,7 @@ def run_generate(
             min_cov=settings.min_audio_coverage_ratio,
             min_peak=settings.min_peak_score,
             motion_cfg=settings.motion_analysis,
+            pose_metrics_cfg=pose_m_cfg,
         )
     elif duration is None or duration <= 0:
         merged_segments = 0
@@ -1201,6 +1437,11 @@ def run_generate(
         scenes_pyscenedetect=scene_pyscene_count,
         scenes_after_min_duration=scene_after_min_count,
         scene_units_total=len(unit_evals) if scene_mode else None,
+        selection_mode=selection_mode if scene_mode else None,
+        short_scenes_merged=scene_stats.short_scenes_merged if scene_stats else None,
+        long_scenes_split=long_scenes_split if scene_mode else None,
+        audio_analysis_enabled=run_audio if scene_mode else None,
+        motion_analysis_enabled=motion_cfg.enabled if scene_mode else None,
     )
     return summary, fatal, True
 
@@ -1208,30 +1449,45 @@ def run_generate(
 def print_generate_summary(summary: CandidateBuildSummary) -> None:
     print("")
     print("--- Сводка generate ---")
+    if summary.selection_mode:
+        print(f"Режим отбора: {summary.selection_mode}")
     if summary.scene_detection_used:
-        print(f"Обнаружение сцен (PySceneDetect): enabled")
+        print("Обнаружение сцен: enabled")
         if summary.scenes_pyscenedetect is not None:
-            print(f"  Сцен до фильтра min_scene_seconds (raw): {summary.scenes_pyscenedetect}")
+            print(f"  Сцен до post-process (raw): {summary.scenes_pyscenedetect}")
         if summary.scenes_after_min_duration is not None:
-            print(f"  Сцен после фильтра min_scene_seconds: {summary.scenes_after_min_duration}")
+            print(f"  Сцен после merge/filter: {summary.scenes_after_min_duration}")
+        if summary.short_scenes_merged is not None:
+            print(f"  Коротких сцен объединено: {summary.short_scenes_merged}")
+        if summary.long_scenes_split is not None:
+            print(f"  Длинных сцен разбито: {summary.long_scenes_split}")
         if summary.scene_units_total is not None:
             print(f"  Единиц отбора (сцена/фрагмент): {summary.scene_units_total}")
-        print(f"Всего аудио-окон: {summary.total_windows}")
-        print(f"Окон с успешным аудио-анализом: {summary.analyzed_ok}")
-        print(f"Окон без аудио-анализа: {summary.analyze_failed_windows}")
-        print(
-            "Выбрано единиц (audio_coverage / audio_peak / "
-            "motion_coverage / motion_peak): "
-            f"{summary.selected_windows}"
-        )
+        if summary.audio_analysis_enabled is not None:
+            print(f"  Audio analysis: {'enabled' if summary.audio_analysis_enabled else 'disabled'}")
+        if summary.motion_analysis_enabled is not None:
+            print(f"  Motion analysis: {'enabled' if summary.motion_analysis_enabled else 'disabled'}")
+        if summary.selection_mode == "review_all_scenes":
+            print(f"  Кандидатов записано (все сцены): {summary.generated_candidates}")
+        else:
+            print(f"Всего аудио-окон: {summary.total_windows}")
+            print(f"Окон с успешным аудио-анализом: {summary.analyzed_ok}")
+            print(f"Окон без аудио-анализа: {summary.analyze_failed_windows}")
+            print(
+                "Выбрано единиц (audio_coverage / audio_peak / "
+                "motion_coverage / motion_peak): "
+                f"{summary.selected_windows}"
+            )
+            print(f"Объединённых сегментов: {summary.merged_segments}")
+            print(f"Сгенерировано клипов-кандидатов: {summary.generated_candidates}")
     else:
-        print(f"Обнаружение сцен: disabled")
+        print("Обнаружение сцен: disabled")
         print(f"Всего окон: {summary.total_windows}")
         print(f"Окон после анализа (успех): {summary.analyzed_ok}")
         print(f"Окон без анализа: {summary.analyze_failed_windows}")
         print(f"Выбрано окон по порогу: {summary.selected_windows}")
-    print(f"Объединённых сегментов: {summary.merged_segments}")
-    print(f"Сгенерировано клипов-кандидатов: {summary.generated_candidates}")
+        print(f"Объединённых сегментов: {summary.merged_segments}")
+        print(f"Сгенерировано клипов-кандидатов: {summary.generated_candidates}")
     if summary.skipped_short:
         print(f"Отсечено слишком коротких вставок: {summary.skipped_short}")
     print("")

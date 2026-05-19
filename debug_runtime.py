@@ -85,16 +85,25 @@ def format_tool_settings_lines(settings: ToolSettings, *, prefix: str = "  ") ->
     lm = settings.motion_analysis
     lines.extend(
         [
+            f"{prefix}[motion_analysis] backend = {lm.backend}",
             f"{prefix}[motion_analysis] enabled = {lm.enabled}",
             f"{prefix}[motion_analysis] sample_fps = {lm.sample_fps}",
             f"{prefix}[motion_analysis] resize_width = {lm.resize_width}",
             f"{prefix}[motion_analysis] residual_percentile = {lm.residual_percentile}",
-            f"{prefix}[motion_analysis] motion_threshold = {lm.motion_threshold}",
             f"{prefix}[motion_analysis] min_motion_coverage_ratio = {lm.min_motion_coverage_ratio}",
-            f"{prefix}[motion_analysis] min_motion_peak_score = {lm.min_motion_peak_score}",
+            f"{prefix}[motion_analysis.optical_flow] motion_threshold = {lm.optical_flow.motion_threshold}",
+            f"{prefix}[motion_analysis.optical_flow] min_motion_peak_score = {lm.optical_flow.min_motion_peak_score}",
+            f"{prefix}[motion_analysis.mediapipe_pose] motion_threshold = {lm.mediapipe_pose.motion_threshold}",
+            f"{prefix}[motion_analysis.mediapipe_pose] min_motion_peak_score = {lm.mediapipe_pose.min_motion_peak_score}",
+            f"{prefix}[motion_analysis] active motion_threshold = {lm.motion_threshold} (backend={lm.backend})",
+            f"{prefix}[motion_analysis] active min_motion_peak_score = {lm.min_motion_peak_score} (backend={lm.backend})",
             f"{prefix}[motion_analysis] affect_selection = {lm.affect_selection}",
             f"{prefix}[motion_analysis] affect_score = {lm.affect_score}",
             f"{prefix}[motion_analysis] weight_motion = {lm.weight_motion}",
+            f"{prefix}[motion_analysis] mediapipe_pose_model = {lm.mediapipe_pose_model}",
+            f"{prefix}[motion_analysis] mediapipe_min_detection_confidence = {lm.mediapipe_min_detection_confidence}",
+            f"{prefix}[motion_analysis] mediapipe_min_tracking_confidence = {lm.mediapipe_min_tracking_confidence}",
+            f"{prefix}[motion_analysis] mediapipe_visibility_threshold = {lm.mediapipe_visibility_threshold}",
         ]
     )
     return lines

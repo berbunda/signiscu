@@ -176,6 +176,9 @@ def main() -> None:
                 config_path_explicit_cli=cli.config_path_explicit,
                 project_path_used=project_path_used,
                 metrics_settings=pt.metrics if pt is not None else None,
+                mediapipe_pose_metrics=pt.mediapipe_pose_metrics if pt is not None else None,
+                selection_mode=pt.selection.mode if pt is not None else "filtered",
+                audio_analysis_enabled=pt.audio_analysis.enabled if pt is not None else True,
             )
             if wrote_json:
                 json_paths_for_csv.append(candidate_out)

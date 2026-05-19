@@ -14,20 +14,35 @@ class SceneDetectionSettings:
     show_progress: bool
     max_scene_seconds: float
     ffmpeg_scene_threshold: float
+    merge_short_scenes: bool
+    merge_short_scenes_target_seconds: float
+
+
+@dataclass(frozen=True)
+class MotionBackendTuneSettings:
+    motion_threshold: float
+    min_motion_peak_score: float
 
 
 @dataclass(frozen=True)
 class MotionAnalysisSettings:
     enabled: bool
+    backend: str
     sample_fps: float
     resize_width: int
     residual_percentile: float
+    optical_flow: MotionBackendTuneSettings
+    mediapipe_pose: MotionBackendTuneSettings
     motion_threshold: float
     min_motion_coverage_ratio: float
     min_motion_peak_score: float
     affect_selection: bool
     affect_score: bool
     weight_motion: float
+    mediapipe_pose_model: str
+    mediapipe_min_detection_confidence: float
+    mediapipe_min_tracking_confidence: float
+    mediapipe_visibility_threshold: float
 
 
 @dataclass(frozen=True)
@@ -50,6 +65,7 @@ class ToolSettings:
 
 __all__ = [
     "MotionAnalysisSettings",
+    "MotionBackendTuneSettings",
     "SceneDetectionSettings",
     "ToolSettings",
 ]

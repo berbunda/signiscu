@@ -23,23 +23,20 @@ class SceneSegment:
         return max(0.0, self.end_seconds - self.start_seconds)
 
 
+@dataclass
+class SceneDetectionStats:
+    raw_timestamps_count: int | None = None
+    scenes_before_merge: int = 0
+    scenes_after_short_merge: int = 0
+    scenes_shorter_than_min: int = 0
+    short_scenes_merged: int = 0
+    avg_scene_duration: float | None = None
+    median_scene_duration: float | None = None
+
+
 def _unknown_backend_message(backend: str) -> str:
     opts = ", ".join(sorted(_SCENE_BACKENDS))
     return f"Неизвестный scene_detection.backend: {backend!r}. Допустимо: {opts}."
-
-
-def _filter_by_min_scene_seconds(
-    raw_bounds: list[tuple[float, float]],
-    min_scene_seconds: float,
-) -> tuple[int, list[SceneSegment]]:
-    raw_count = len(raw_bounds)
-    eps = 1e-9
-    filtered = [
-        SceneSegment(s, e)
-        for s, e in raw_bounds
-        if (e - s) >= min_scene_seconds - eps
-    ]
-    return raw_count, filtered
 
 
 def _dedupe_sorted_timestamps(times: list[float], *, eps: float = 1e-6) -> list[float]:
@@ -83,10 +80,158 @@ def _parse_showinfo_pts_times(output: str, duration: float) -> list[float]:
     return _dedupe_sorted_timestamps(raw)
 
 
+def _merge_short_scenes(
+    segments: list[SceneSegment],
+    min_scene_seconds: float,
+    target_seconds: float,
+) -> tuple[list[SceneSegment], int]:
+    """Объединяет сцены короче min_scene_seconds с соседями (gap к target минимален)."""
+    eps = 1e-9
+    segs = [SceneSegment(s.start_seconds, s.end_seconds) for s in segments]
+    merges = 0
+
+    changed = True
+    while changed:
+        changed = False
+        i = 0
+        while i < len(segs):
+            dur = segs[i].duration_seconds
+            if dur >= min_scene_seconds - eps:
+                i += 1
+                continue
+            if len(segs) <= 1:
+                break
+
+            left_ok = i > 0
+            right_ok = i < len(segs) - 1
+            if not left_ok and not right_ok:
+                i += 1
+                continue
+
+            def _gap_to_target(combined: float) -> float:
+                return abs(combined - target_seconds)
+
+            best_side: str | None = None
+            best_gap = float("inf")
+
+            if left_ok:
+                combined = segs[i - 1].duration_seconds + dur
+                g = _gap_to_target(combined)
+                if g < best_gap - eps:
+                    best_gap = g
+                    best_side = "left"
+            if right_ok:
+                combined = dur + segs[i + 1].duration_seconds
+                g = _gap_to_target(combined)
+                if g < best_gap - eps or (abs(g - best_gap) <= eps and best_side != "right"):
+                    best_gap = g
+                    best_side = "right"
+
+            if best_side == "left":
+                merged = SceneSegment(segs[i - 1].start_seconds, segs[i].end_seconds)
+                segs[i - 1 : i + 1] = [merged]
+                merges += 1
+                changed = True
+                i = max(0, i - 1)
+            elif best_side == "right":
+                merged = SceneSegment(segs[i].start_seconds, segs[i + 1].end_seconds)
+                segs[i : i + 2] = [merged]
+                merges += 1
+                changed = True
+            else:
+                i += 1
+
+    return segs, merges
+
+
+def _median(values: list[float]) -> float:
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2.0
+
+
+def _postprocess_scenes(
+    raw_bounds: list[tuple[float, float]],
+    scene_settings: SceneDetectionSettings,
+    stats: SceneDetectionStats,
+) -> list[SceneSegment]:
+    eps = 1e-9
+    segments = [
+        SceneSegment(float(s), float(e))
+        for s, e in raw_bounds
+        if e - s > eps
+    ]
+    stats.scenes_before_merge = len(segments)
+    stats.scenes_shorter_than_min = sum(
+        1 for s in segments if s.duration_seconds < scene_settings.min_scene_seconds - eps
+    )
+
+    if scene_settings.merge_short_scenes:
+        segments, merges = _merge_short_scenes(
+            segments,
+            scene_settings.min_scene_seconds,
+            scene_settings.merge_short_scenes_target_seconds,
+        )
+        stats.short_scenes_merged = merges
+    else:
+        segments = [
+            s
+            for s in segments
+            if s.duration_seconds >= scene_settings.min_scene_seconds - eps
+        ]
+
+    stats.scenes_after_short_merge = len(segments)
+    durations = [s.duration_seconds for s in segments]
+    if durations:
+        stats.avg_scene_duration = sum(durations) / len(durations)
+        stats.median_scene_duration = _median(durations)
+    return segments
+
+
+def _format_scene_detection_debug(
+    scene_settings: SceneDetectionSettings,
+    stats: SceneDetectionStats,
+    *,
+    backend: str,
+    timestamps: list[float] | None = None,
+    ffmpeg_cmd: list[str] | None = None,
+) -> list[str]:
+    lines: list[str] = []
+    lines.append(f"--- Scene detection ({backend}) ---")
+    lines.append(f"  scene backend = {backend}")
+    if backend == "ffmpeg":
+        lines.append(f"  ffmpeg_scene_threshold = {scene_settings.ffmpeg_scene_threshold}")
+    if stats.raw_timestamps_count is not None:
+        lines.append(f"  raw scene timestamps = {stats.raw_timestamps_count}")
+    lines.append(f"  scenes before merge = {stats.scenes_before_merge}")
+    lines.append(f"  scenes after short-scene merge = {stats.scenes_after_short_merge}")
+    lines.append(f"  final candidates count (scenes) = {stats.scenes_after_short_merge}")
+    if stats.avg_scene_duration is not None:
+        lines.append(f"  average scene duration = {stats.avg_scene_duration:.3f}s")
+    if stats.median_scene_duration is not None:
+        lines.append(f"  median scene duration = {stats.median_scene_duration:.3f}s")
+    lines.append(f"  scenes shorter than min_scene_seconds = {stats.scenes_shorter_than_min}")
+    lines.append(f"  short scenes merged = {stats.short_scenes_merged}")
+    if timestamps:
+        preview = timestamps[:10]
+        lines.append(
+            f"  first scene boundaries (cuts, s): {', '.join(f'{t:.3f}' for t in preview)}"
+        )
+    elif timestamps is not None:
+        lines.append("  first scene boundaries (cuts, s): (none)")
+    if ffmpeg_cmd is not None:
+        lines.append(f"  ffmpeg command = {' '.join(ffmpeg_cmd)}")
+    lines.append("")
+    return lines
+
+
 def _detect_scenes_pyscenedetect(
     video_path: Path | str,
     scene_settings: SceneDetectionSettings,
-) -> tuple[int, list[SceneSegment]]:
+) -> list[tuple[float, float]]:
     from scenedetect import ContentDetector, detect
 
     from progress_ui import scenedetect_progress_compat
@@ -105,7 +250,7 @@ def _detect_scenes_pyscenedetect(
         if e <= s:
             continue
         raw_bounds.append((s, e))
-    return _filter_by_min_scene_seconds(raw_bounds, scene_settings.min_scene_seconds)
+    return raw_bounds
 
 
 def _detect_scenes_ffmpeg(
@@ -114,8 +259,7 @@ def _detect_scenes_ffmpeg(
     *,
     ffmpeg_bin: Path,
     ffprobe_bin: Path,
-    debug_lines: list[str] | None = None,
-) -> tuple[int, list[SceneSegment], list[float]]:
+) -> tuple[list[tuple[float, float]], list[float], list[str]]:
     duration, dur_err = ffprobe_duration_seconds(ffprobe_bin, video_path)
     if duration is None or duration <= 0:
         raise RuntimeError(dur_err or "Не удалось получить длительность видео через ffprobe.")
@@ -150,29 +294,12 @@ def _detect_scenes_ffmpeg(
 
     timestamps = _parse_showinfo_pts_times(hay, duration)
     raw_bounds = _segments_from_cut_timestamps(timestamps, duration)
-    raw_count, filtered = _filter_by_min_scene_seconds(raw_bounds, scene_settings.min_scene_seconds)
-
-    if debug_lines is not None:
-        debug_lines.append("--- Scene detection (FFmpeg) ---")
-        debug_lines.append("  scene backend = ffmpeg")
-        debug_lines.append(f"  ffmpeg_scene_threshold = {thr}")
-        debug_lines.append(f"  raw scene timestamps = {len(timestamps)}")
-        debug_lines.append(f"  scenes before min_scene_seconds = {raw_count}")
-        debug_lines.append(f"  scenes after min_scene_seconds = {len(filtered)}")
-        if timestamps:
-            preview = timestamps[:10]
-            debug_lines.append(f"  first scene boundaries (cuts, s): {', '.join(f'{t:.3f}' for t in preview)}")
-        else:
-            debug_lines.append("  first scene boundaries (cuts, s): (none)")
-        debug_lines.append(f"  ffmpeg command = {' '.join(cmd)}")
-        debug_lines.append("")
-
-    return raw_count, filtered, timestamps
+    return raw_bounds, timestamps, cmd
 
 
 def detect_scenes(video_path: Path | str, scene_settings: SceneDetectionSettings, **kwargs) -> list[SceneSegment]:
-    """Границы сцен в секундах; сцены короче min_scene_seconds отбрасываются."""
-    _, segments = detect_scenes_with_counts(video_path, scene_settings, **kwargs)
+    """Границы сцен в секундах; короткие сцены объединяются или отбрасываются."""
+    _, segments, _ = detect_scenes_with_counts(video_path, scene_settings, **kwargs)
     return segments
 
 
@@ -183,39 +310,62 @@ def detect_scenes_with_counts(
     ffmpeg_bin: Path | None = None,
     ffprobe_bin: Path | None = None,
     debug_lines: list[str] | None = None,
-) -> tuple[int, list[SceneSegment]]:
+) -> tuple[int, list[SceneSegment], SceneDetectionStats]:
     """
-    Обнаружение сцен выбранным backend; фильтр min_scene_seconds.
+    Обнаружение сцен выбранным backend; post-process (merge или filter коротких сцен).
 
-    Возвращает (число сцен до фильтра min_scene_seconds, отфильтрованный список).
-  """
+    Возвращает (число сцен до post-process, финальный список, статистику).
+    """
     backend = scene_settings.backend.strip().lower()
     if backend not in _SCENE_BACKENDS:
         raise ValueError(_unknown_backend_message(scene_settings.backend))
 
     path = Path(video_path)
+    stats = SceneDetectionStats()
+    timestamps: list[float] | None = None
+    ffmpeg_cmd: list[str] | None = None
 
     if backend == "pyscenedetect":
         try:
-            return _detect_scenes_pyscenedetect(path, scene_settings)
+            raw_bounds = _detect_scenes_pyscenedetect(path, scene_settings)
         except ImportError as e:
             raise ImportError(
                 "Для scene_detection.backend=pyscenedetect нужен пакет scenedetect."
             ) from e
-
-    if ffmpeg_bin is None or ffprobe_bin is None:
-        raise ValueError(
-            "Для scene_detection.backend=ffmpeg нужны пути к ffmpeg и ffprobe "
-            "(задайте [tools] ffmpeg_path / ffprobe_path в config.toml)."
+    else:
+        if ffmpeg_bin is None or ffprobe_bin is None:
+            raise ValueError(
+                "Для scene_detection.backend=ffmpeg нужны пути к ffmpeg и ffprobe "
+                "(задайте [tools] ffmpeg_path / ffprobe_path в config.toml)."
+            )
+        raw_bounds, timestamps, ffmpeg_cmd = _detect_scenes_ffmpeg(
+            path,
+            scene_settings,
+            ffmpeg_bin=ffmpeg_bin,
+            ffprobe_bin=ffprobe_bin,
         )
-    raw_count, filtered, _ = _detect_scenes_ffmpeg(
-        path,
-        scene_settings,
-        ffmpeg_bin=ffmpeg_bin,
-        ffprobe_bin=ffprobe_bin,
-        debug_lines=debug_lines,
-    )
-    return raw_count, filtered
+        stats.raw_timestamps_count = len(timestamps)
+
+    raw_count = len(raw_bounds)
+    segments = _postprocess_scenes(raw_bounds, scene_settings, stats)
+
+    if debug_lines is not None:
+        debug_lines.extend(
+            _format_scene_detection_debug(
+                scene_settings,
+                stats,
+                backend=backend,
+                timestamps=timestamps,
+                ffmpeg_cmd=ffmpeg_cmd,
+            )
+        )
+
+    return raw_count, segments, stats
 
 
-__all__ = ["SceneSegment", "detect_scenes", "detect_scenes_with_counts"]
+__all__ = [
+    "SceneDetectionStats",
+    "SceneSegment",
+    "detect_scenes",
+    "detect_scenes_with_counts",
+]

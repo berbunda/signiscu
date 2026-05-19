@@ -308,23 +308,62 @@ def _esc(text: str) -> str:
     return html.escape(text, quote=True)
 
 
-def _render_metrics(metrics: dict[str, Any]) -> str:
-    if not metrics:
-        return '<p class="muted">нет метрик</p>'
+_POSE_METRIC_PREFIXES = (
+    "pose_",
+    "avg_visible_landmarks",
+    "landmark_dropout",
+    "upper_body_",
+    "lower_body_",
+    "torso_motion_",
+    "head_motion_",
+)
+
+
+def _is_pose_metric_key(key: str) -> bool:
+    return key.startswith(_POSE_METRIC_PREFIXES)
+
+
+def _render_metric_rows(metrics: dict[str, Any], *, compact: bool = False) -> str:
     rows: list[str] = []
     for key, val in metrics.items():
-        if key in ("start", "end"):
-            continue
         cls = "metric-val mono"
         if isinstance(val, (int, float)) and not isinstance(val, bool):
             cls += " score"
+        key_cls = "metric-key metric-key-compact" if compact else "metric-key"
         rows.append(
             f'<div class="metric-row">'
-            f'<span class="metric-key">{_esc(key)}</span>'
+            f'<span class="{key_cls}">{_esc(key)}</span>'
             f'<span class="{cls}">{_esc(_format_metric_value(val))}</span>'
             f"</div>"
         )
-    return f'<div class="metrics">{"".join(rows)}</div>'
+    return "".join(rows)
+
+
+def _render_metrics(metrics: dict[str, Any]) -> str:
+    if not metrics:
+        return '<p class="muted">нет метрик</p>'
+    main: dict[str, Any] = {}
+    pose: dict[str, Any] = {}
+    for key, val in metrics.items():
+        if key in ("start", "end"):
+            continue
+        if _is_pose_metric_key(key):
+            pose[key] = val
+        else:
+            main[key] = val
+    parts: list[str] = []
+    if main:
+        parts.append(f'<div class="metrics">{_render_metric_rows(main)}</div>')
+    if pose:
+        parts.append(
+            '<details class="pose-metrics">'
+            '<summary>MediaPipe Pose</summary>'
+            f'<div class="metrics metrics-compact">{_render_metric_rows(pose, compact=True)}</div>'
+            "</details>"
+        )
+    if not parts:
+        return '<p class="muted">нет метрик</p>'
+    return "".join(parts)
 
 
 def _previews_grid_order(previews: list[PreviewFrame]) -> list[PreviewFrame]:
@@ -577,7 +616,11 @@ main { padding: 1rem 1.5rem 2rem; max-width: 1600px; margin: 0 auto; }
   border-bottom: 1px solid rgba(255,255,255,0.04);
 }
 .metric-key { color: var(--muted); }
+.metric-key-compact { font-size: 0.72rem; }
 .metric-val.score { color: var(--accent); }
+.pose-metrics { margin-top: 0.35rem; font-size: 0.75rem; }
+.pose-metrics summary { cursor: pointer; color: var(--muted); }
+.metrics-compact .metric-row { padding: 0.06rem 0; }
 .muted { color: var(--muted); font-size: 0.85rem; }
 .modal {
   position: fixed;

@@ -31,6 +31,86 @@ def _bool(d: dict[str, Any], key: str, default: bool) -> bool:
 
 
 @dataclass(frozen=True)
+class MediapipePoseMetricsSettings:
+    """Экспериментальные MediaPipe Pose метрики ([motion_analysis.mediapipe_pose_metrics] в project.toml)."""
+
+    enabled: bool = False
+    pose_detection_ratio: bool = False
+    avg_visible_landmarks: bool = False
+    pose_visibility_score: bool = False
+    landmark_dropout_ratio: bool = False
+    pose_tracking_stability: bool = False
+    upper_body_motion_score: bool = False
+    lower_body_motion_score: bool = False
+    torso_motion_score: bool = False
+    head_motion_score: bool = False
+    pose_motion_direction_variance: bool = False
+    pose_motion_periodicity: bool = False
+
+
+def load_mediapipe_pose_metrics_settings(root: dict[str, Any]) -> MediapipePoseMetricsSettings:
+    motion = _table(root, "motion_analysis")
+    sub = motion.get("mediapipe_pose_metrics")
+    if sub is None:
+        sub = {}
+    if not isinstance(sub, dict):
+        raise ProjectTomlError(
+            "Секция [motion_analysis.mediapipe_pose_metrics] должна быть таблицей."
+        )
+    return MediapipePoseMetricsSettings(
+        enabled=_bool(sub, "enabled", False),
+        pose_detection_ratio=_bool(sub, "pose_detection_ratio", False),
+        avg_visible_landmarks=_bool(sub, "avg_visible_landmarks", False),
+        pose_visibility_score=_bool(sub, "pose_visibility_score", False),
+        landmark_dropout_ratio=_bool(sub, "landmark_dropout_ratio", False),
+        pose_tracking_stability=_bool(sub, "pose_tracking_stability", False),
+        upper_body_motion_score=_bool(sub, "upper_body_motion_score", False),
+        lower_body_motion_score=_bool(sub, "lower_body_motion_score", False),
+        torso_motion_score=_bool(sub, "torso_motion_score", False),
+        head_motion_score=_bool(sub, "head_motion_score", False),
+        pose_motion_direction_variance=_bool(sub, "pose_motion_direction_variance", False),
+        pose_motion_periodicity=_bool(sub, "pose_motion_periodicity", False),
+    )
+
+
+_SELECTION_MODES = frozenset({"filtered", "review_all_scenes"})
+
+
+@dataclass(frozen=True)
+class SelectionSettings:
+    """Режим отбора кандидатов ([selection] в project.toml)."""
+
+    mode: str = "filtered"
+
+
+@dataclass(frozen=True)
+class AudioAnalysisProjectSettings:
+    """Управление audio analysis в review_all_scenes ([audio_analysis] в project.toml)."""
+
+    enabled: bool = True
+
+
+def load_selection_settings(root: dict[str, Any]) -> SelectionSettings:
+    sel = _table(root, "selection")
+    mode = "filtered"
+    if "mode" in sel:
+        v = sel["mode"]
+        if isinstance(v, bool):
+            raise ProjectTomlError("Поле selection.mode: ожидается строка.")
+        s = str(v).strip().lower()
+        if s not in _SELECTION_MODES:
+            opts = ", ".join(sorted(_SELECTION_MODES))
+            raise ProjectTomlError(f"Поле selection.mode: неизвестное значение {v!r}; допустимо: {opts}.")
+        mode = s
+    return SelectionSettings(mode=mode)
+
+
+def load_audio_analysis_project_settings(root: dict[str, Any]) -> AudioAnalysisProjectSettings:
+    audio = _table(root, "audio_analysis")
+    return AudioAnalysisProjectSettings(enabled=_bool(audio, "enabled", True))
+
+
+@dataclass(frozen=True)
 class MetricsSettings:
     """Опциональные метрики кандидата ([metrics] в project.toml; отсутствие ключа = false)."""
 
@@ -82,6 +162,9 @@ class ProjectToml:
     debug_enabled: bool
     debug_log_file: Path | None
     metrics: MetricsSettings
+    mediapipe_pose_metrics: MediapipePoseMetricsSettings
+    selection: SelectionSettings
+    audio_analysis: AudioAnalysisProjectSettings
 
 
 def _normalize_windows_path_string(s: str) -> str:
@@ -147,13 +230,22 @@ def load_project_toml(path: Path) -> ProjectToml:
         debug_enabled=enabled,
         debug_log_file=log_path,
         metrics=load_metrics_settings(data),
+        mediapipe_pose_metrics=load_mediapipe_pose_metrics_settings(data),
+        selection=load_selection_settings(data),
+        audio_analysis=load_audio_analysis_project_settings(data),
     )
 
 
 __all__ = [
+    "AudioAnalysisProjectSettings",
+    "MediapipePoseMetricsSettings",
     "MetricsSettings",
     "ProjectToml",
     "ProjectTomlError",
+    "SelectionSettings",
+    "load_audio_analysis_project_settings",
+    "load_mediapipe_pose_metrics_settings",
     "load_metrics_settings",
+    "load_selection_settings",
     "load_project_toml",
 ]

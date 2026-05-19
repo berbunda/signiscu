@@ -2,3 +2,5 @@ scenedetect[opencv]>=0.6.4
 numpy>=1.26.0
 opencv-python
 tqdm>=4.66.0
+# Optional: motion backend mediapipe_pose (CPU, Tasks API)
+mediapipe>=0.10.0

@@ -6,7 +6,12 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from settings import MotionAnalysisSettings, SceneDetectionSettings, ToolSettings
+from settings import (
+    MotionAnalysisSettings,
+    MotionBackendTuneSettings,
+    SceneDetectionSettings,
+    ToolSettings,
+)
 
 
 class ConfigLoadError(ValueError):
@@ -64,6 +69,26 @@ def _bool(d: dict[str, Any], key: str, default: bool) -> bool:
     raise ConfigLoadError(f"Поле {key!r}: ожидается логическое значение.")
 
 
+def _motion_backend_tune(
+    motion_tbl: dict[str, Any],
+    subsection: str,
+    *,
+    default_motion_threshold: float,
+    default_min_motion_peak_score: float,
+) -> MotionBackendTuneSettings:
+    sub = motion_tbl.get(subsection)
+    if sub is None:
+        sub = {}
+    if not isinstance(sub, dict):
+        raise ConfigLoadError(
+            f"Секция [motion_analysis.{subsection}] должна быть таблицей."
+        )
+    return MotionBackendTuneSettings(
+        motion_threshold=_float(sub, "motion_threshold", default_motion_threshold),
+        min_motion_peak_score=_float(sub, "min_motion_peak_score", default_min_motion_peak_score),
+    )
+
+
 def _backend(d: dict[str, Any], key: str, default: str, allowed: frozenset[str]) -> str:
     if key not in d:
         return default
@@ -109,22 +134,61 @@ def load_config_toml(explicit_path: Path | None, default_path: Path) -> ToolSett
         enabled=_bool(scene, "enabled", False),
         backend=_backend(scene, "backend", "ffmpeg", frozenset({"pyscenedetect", "ffmpeg"})),
         threshold=_float(scene, "threshold", 27.0),
-        min_scene_seconds=_float(scene, "min_scene_seconds", 2.0),
+        min_scene_seconds=_float(scene, "min_scene_seconds", 6.0),
         show_progress=_bool(scene, "show_progress", True),
-        max_scene_seconds=_float(scene, "max_scene_seconds", 30.0),
+        max_scene_seconds=_float(scene, "max_scene_seconds", 240.0),
         ffmpeg_scene_threshold=_float(scene, "ffmpeg_scene_threshold", 0.30),
+        merge_short_scenes=_bool(scene, "merge_short_scenes", True),
+        merge_short_scenes_target_seconds=_float(scene, "merge_short_scenes_target_seconds", 16.0),
+    )
+    motion_backend = _backend(
+        motion_tbl,
+        "backend",
+        "optical_flow",
+        frozenset({"optical_flow", "mediapipe_pose"}),
+    )
+    optical_flow_tune = _motion_backend_tune(
+        motion_tbl,
+        "optical_flow",
+        default_motion_threshold=0.4,
+        default_min_motion_peak_score=0.85,
+    )
+    mediapipe_pose_tune = _motion_backend_tune(
+        motion_tbl,
+        "mediapipe_pose",
+        default_motion_threshold=0.05,
+        default_min_motion_peak_score=0.15,
+    )
+    active_tune = (
+        mediapipe_pose_tune if motion_backend == "mediapipe_pose" else optical_flow_tune
     )
     motion_block = MotionAnalysisSettings(
         enabled=_bool(motion_tbl, "enabled", False),
+        backend=motion_backend,
         sample_fps=_float(motion_tbl, "sample_fps", 2.0),
         resize_width=_int(motion_tbl, "resize_width", 320),
         residual_percentile=_float(motion_tbl, "residual_percentile", 85.0),
-        motion_threshold=_float(motion_tbl, "motion_threshold", 0.4),
+        optical_flow=optical_flow_tune,
+        mediapipe_pose=mediapipe_pose_tune,
+        motion_threshold=active_tune.motion_threshold,
         min_motion_coverage_ratio=_float(motion_tbl, "min_motion_coverage_ratio", 0.3),
-        min_motion_peak_score=_float(motion_tbl, "min_motion_peak_score", 0.85),
+        min_motion_peak_score=active_tune.min_motion_peak_score,
         affect_selection=_bool(motion_tbl, "affect_selection", False),
         affect_score=_bool(motion_tbl, "affect_score", False),
         weight_motion=_float(motion_tbl, "weight_motion", 0.2),
+        mediapipe_pose_model=_backend(
+            motion_tbl,
+            "mediapipe_pose_model",
+            "lite",
+            frozenset({"lite", "full", "heavy"}),
+        ),
+        mediapipe_min_detection_confidence=_float(
+            motion_tbl, "mediapipe_min_detection_confidence", 0.5
+        ),
+        mediapipe_min_tracking_confidence=_float(
+            motion_tbl, "mediapipe_min_tracking_confidence", 0.5
+        ),
+        mediapipe_visibility_threshold=_float(motion_tbl, "mediapipe_visibility_threshold", 0.5),
     )
 
     tools_block = ToolSettings(

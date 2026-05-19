@@ -20,19 +20,34 @@ max_clip_seconds = 90
 enabled = true
 backend = "ffmpeg"  # pyscenedetect | ffmpeg
 threshold = 27.0
-min_scene_seconds = 2.0
+min_scene_seconds = 6.0
 show_progress = true
-max_scene_seconds = 150.0
+max_scene_seconds = 240.0
 ffmpeg_scene_threshold = 0.30
+merge_short_scenes = true
+merge_short_scenes_target_seconds = 16.0
 
 [motion_analysis]
+backend = "optical_flow"  # optical_flow | mediapipe_pose
 enabled = true
 sample_fps = 2.0
 resize_width = 320
 residual_percentile = 85
-motion_threshold = 0.4
 min_motion_coverage_ratio = 0.3
-min_motion_peak_score = 0.85
 affect_selection = false
 affect_score = false
 weight_motion = 0.2
+
+# MediaPipe settings (backend = mediapipe_pose)
+mediapipe_pose_model = "lite"  # lite | full | heavy
+mediapipe_min_detection_confidence = 0.5
+mediapipe_min_tracking_confidence = 0.5
+mediapipe_visibility_threshold = 0.5
+
+[motion_analysis.optical_flow]
+motion_threshold = 0.4
+min_motion_peak_score = 0.85
+
+[motion_analysis.mediapipe_pose]
+motion_threshold = 0.05
+min_motion_peak_score = 0.15
